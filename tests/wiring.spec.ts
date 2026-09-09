@@ -2,12 +2,14 @@
  * Wiring tests: the plugin against a real cordis context, a real agent-scoped
  * selection listener, and the real waterfall dispatcher the agent loop uses.
  *
- * The load-bearing case is the first one. `installModelSelection` re-applies the
- * session's stored effort from an agent-scoped listener, and this harness
- * installs it *before* the plugin — exactly the adversarial order. The plugin
- * only wins because it registers `agent/request` with `prepend: true`, making
- * it the outermost listener whose return value is final. If that regresses,
- * the first test fails.
+ * Two properties are load-bearing here:
+ *
+ * 1. The plugin registers `agent/request` with `prepend: true`, so it is the
+ *    outermost listener and its returned configuration is final. This harness
+ *    installs `installModelSelection` **first** — the adversarial order — so the
+ *    gear tests fail if that ever regresses.
+ * 2. A gear request must never reach the adapter. Every gear test asserts the
+ *    returned effort is a real rung (or absent), never the gear id.
  */
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -20,15 +22,27 @@ import { resolveConfig } from '../src/config.ts'
 import type { ConfigShape } from '../src/config.ts'
 import { apply } from '../src/index.ts'
 
+const GEAR = 'auto'
+
 /** A fake route declaring `efforts`, or no reasoning capability at all when `null`. */
 function fakeLlm(efforts: readonly string[] | null): LlmRuntime {
+  const resolveModelInfo = async (provider: string, model: string) => ({
+    provider,
+    id: model,
+    name: model,
+    ...efforts === null ? {} : { reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } },
+  })
   return {
-    resolveModelInfo: async (provider: string, model: string) => ({
-      provider,
-      id: model,
-      name: model,
-      ...efforts === null ? {} : { reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } },
-    }),
+    resolveModelInfo,
+    // The real service validates an explicit effort against the adapter's
+    // declared rungs; the plugin's capability wrapper makes the gear acceptable.
+    resolveCallConfig: async (config: LlmCallConfig) => {
+      const requested = config.reasoningEffort === undefined ? undefined : String(config.reasoningEffort)
+      if (requested !== undefined && requested !== GEAR && !(efforts ?? []).includes(requested)) {
+        throw new Error(`does not support reasoning effort "${requested}"`)
+      }
+      return config
+    },
   } as unknown as LlmRuntime
 }
 
@@ -106,105 +120,121 @@ function harness(options: HarnessOptions = {}): Harness {
         messages: [...messages],
       }))
     },
-    async request(turn, step = 1, seed = { provider: 'fake', model: 'fake-1' }) {
+    async request(turn, step = 1, seed = { provider: 'fake', model: 'fake-1', reasoningEffort: ReasoningEffortId(GEAR) }) {
       return await dispatch.waterfall('agent/request', { turn, step, signal }, () => Promise.resolve(seed))
     },
   }
 }
 
-describe('agent/request wiring', () => {
-  it('overrides a stored selection effort with the classified level', async () => {
-    const h = harness({ selectedEffort: 'low' })
+describe('Auto gear', () => {
+  it('turns a gear request into the classified level', async () => {
+    const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('think hard about the deadlock in the uploader')])
     expect((await h.request(1)).reasoningEffort).toBe('max')
   })
 
-  it('raises a stored selection on a cause question', async () => {
-    const h = harness({ selectedEffort: 'low' })
-    await h.preStep(1, [userMessage('Why does the migration throw a TypeError?')])
+  it('turns a gear request into a real rung even with no observation', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    const config = await h.request(1)
+    expect(config.reasoningEffort).toBe('high')
+  })
+
+  it('drops a gear request when the route declares no efforts', async () => {
+    const h = harness({ efforts: null, selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBeUndefined()
+  })
+
+  it('drops a gear request when no rung matches the ladder', async () => {
+    const h = harness({ efforts: ['tiny', 'huge'], selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBeUndefined()
+  })
+
+  it('clamps a gear decision to the nearest declared rung', async () => {
+    // `please do it` scores into the `low` band; this route has no `low`.
+    const h = harness({ efforts: ['off', 'high', 'max'], selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('please do it')])
     expect((await h.request(1)).reasoningEffort).toBe('high')
   })
 
-  it('lowers a stored selection for chit-chat', async () => {
-    const h = harness({ selectedEffort: 'high' })
-    await h.preStep(1, [userMessage('谢谢')])
-    expect((await h.request(1)).reasoningEffort).toBe('off')
-  })
-
-  it('leaves the composed effort alone when the turn was never observed', async () => {
-    const h = harness({ selectedEffort: 'low' })
+  it('substitutes the gear for a subagent too, even when subagents are skipped', async () => {
+    const h = harness({ subagent: true, selectedEffort: GEAR })
     await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(2)).reasoningEffort).toBe('low')
+    // `applyToSubagents: false` keeps the plugin from classifying, but the gear
+    // must still be resolved: it can never reach the adapter.
+    expect((await h.request(1)).reasoningEffort).toBe('high')
   })
 
-  it('ignores plugin-injected messages', async () => {
+  it('sanitizes a stored gear when the plugin is disabled', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { enabled: false } })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('decides without rewriting in dry-run mode', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { dryRun: true } })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBe(GEAR)
+  })
+})
+
+describe('manual gears', () => {
+  it('leaves an explicit effort untouched', async () => {
     const h = harness({ selectedEffort: 'low' })
-    await h.preStep(1, [pluginMessage('think hard about everything')])
+    await h.preStep(1, [userMessage('think hard about the deadlock')])
     expect((await h.request(1)).reasoningEffort).toBe('low')
   })
 
-  it('leaves a matching effort untouched, returning the composed object', async () => {
+  it('leaves an explicit effort untouched even for chit-chat', async () => {
+    const h = harness({ selectedEffort: 'high' })
+    await h.preStep(1, [userMessage('谢谢')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('leaves an explicit effort untouched on a subagent', async () => {
+    const h = harness({ subagent: true, selectedEffort: 'max' })
+    await h.preStep(1, [userMessage('谢谢')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
+  })
+})
+
+describe('autoWhenUnset', () => {
+  it('classifies a request with no explicit effort by default', async () => {
+    const h = harness({ selectedEffort: undefined })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
+  })
+
+  it('leaves a request with no explicit effort alone when disabled', async () => {
+    const h = harness({ selectedEffort: undefined, config: { autoWhenUnset: false } })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(1)).reasoningEffort).toBeUndefined()
+  })
+})
+
+describe('turn state', () => {
+  it('leaves the composed effort alone when the turn was never observed', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('think hard')])
+    expect((await h.request(2)).reasoningEffort).toBe('high')
+  })
+
+  it('ignores plugin-injected messages', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [pluginMessage('think hard about everything')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('returns the same object when nothing changes', async () => {
     const h = harness({ selection: false })
     await h.preStep(1, [userMessage('Add a retry to the upload helper')])
     const seed: LlmCallConfig = { provider: 'fake', model: 'fake-1', reasoningEffort: ReasoningEffortId('high') }
     expect(await h.request(1, 1, seed)).toBe(seed)
   })
 
-  it('replaces the effort with a new object only when it changes', async () => {
-    const h = harness({ selection: false })
-    await h.preStep(1, [userMessage('think hard')])
-    const seed: LlmCallConfig = { provider: 'fake', model: 'fake-1', reasoningEffort: ReasoningEffortId('high') }
-    const config = await h.request(1, 1, seed)
-    expect(config).not.toBe(seed)
-    expect(config.reasoningEffort).toBe('max')
-  })
-
-  it('clamps a level whose rung the route does not declare', async () => {
-    // `please do it` scores into the `low` band; this route has no `low`, so
-    // the nearest declared rung (`high`) is used.
-    const h = harness({ efforts: ['off', 'high', 'max'], selectedEffort: 'high' })
-    await h.preStep(1, [userMessage('please do it')])
-    expect((await h.request(1)).reasoningEffort).toBe('high')
-  })
-
-  it('yields to an explicit effort when respectExplicitEffort is set', async () => {
-    const h = harness({ selectedEffort: 'low', config: { respectExplicitEffort: true } })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
-  })
-
-  it('leaves a subagent child alone by default', async () => {
-    const h = harness({ subagent: true, selectedEffort: 'low' })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
-  })
-
-  it('classifies a subagent child when asked', async () => {
-    const h = harness({ subagent: true, selectedEffort: 'low', config: { applyToSubagents: true } })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBe('max')
-  })
-
-  it('decides without rewriting in dry-run mode', async () => {
-    const h = harness({ selectedEffort: 'low', config: { dryRun: true } })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
-  })
-
-  it('leaves the effort alone when the route declares none', async () => {
-    const h = harness({ efforts: null, selectedEffort: 'low' })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
-  })
-
-  it('leaves the effort alone when the route shares no rung with the ladder', async () => {
-    const h = harness({ efforts: ['tiny', 'huge'] })
-    await h.preStep(1, [userMessage('think hard')])
-    expect((await h.request(1)).reasoningEffort).toBeUndefined()
-  })
-
   it('keeps a turn at its level across steps', async () => {
-    const h = harness({ selectedEffort: 'low' })
+    const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('谢谢')], 1)
     expect((await h.request(1, 1)).reasoningEffort).toBe('off')
     // A later step in the same turn carries only a plugin-injected tool result.
@@ -213,7 +243,7 @@ describe('agent/request wiring', () => {
   })
 
   it('raises, but never lowers, a turn on steering', async () => {
-    const h = harness({ selectedEffort: 'low' })
+    const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('Add a retry to the upload helper')], 1)
     await h.preStep(1, [userMessage('ok, go ahead')], 2)
     expect((await h.request(1, 2)).reasoningEffort).toBe('high')
@@ -223,14 +253,14 @@ describe('agent/request wiring', () => {
   })
 
   it('inherits the previous level for a bare continuation', async () => {
-    const h = harness({ selectedEffort: 'low' })
+    const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('think hard about the deadlock')], 1)
     expect((await h.request(1, 1)).reasoningEffort).toBe('max')
     await h.preStep(2, [userMessage('继续')], 1)
     expect((await h.request(2, 1)).reasoningEffort).toBe('max')
   })
 
-  it('does nothing when the plugin is disabled', async () => {
+  it('does nothing when the plugin is disabled and no gear is involved', async () => {
     const h = harness({ selectedEffort: 'low', config: { enabled: false } })
     await h.preStep(1, [userMessage('think hard')])
     expect((await h.request(1)).reasoningEffort).toBe('low')

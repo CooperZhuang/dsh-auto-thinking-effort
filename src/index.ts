@@ -5,7 +5,22 @@
  * The plugin owns exactly one piece of request state: `reasoningEffort`. It
  * never touches the provider, the model, the prompt, or the message list.
  *
- * Where it hooks, and why:
+ * ## How a user drives it
+ *
+ * The plugin contributes one extra gear — **Auto** — to every route that
+ * advertises selectable efforts (`src/capability.ts`), so the model picker
+ * shows `Auto, off, low, high, max`. Then:
+ *
+ * | Session selection | Behaviour |
+ * |---|---|
+ * | `Auto` (the synthetic gear) | this plugin decides every turn |
+ * | no explicit effort (`autoWhenUnset`) | this plugin decides every turn |
+ * | `off` / `low` / `high` / `max` | untouched — a manual choice always wins |
+ *
+ * The gear is *not* an adapter effort. It is substituted for a real one before
+ * `prepareCall` runs, so it can never reach a provider request.
+ *
+ * ## Where it hooks, and why
  *
  * - `agent/pre-step` is the only seam that sees the user's own words before the
  *   request is composed. The claimed messages carry the turn's question; a
@@ -15,11 +30,11 @@
  *   frozen call configuration. It is registered with `prepend: true` so this
  *   listener stays the outermost one and therefore has the last word: an agent
  *   preset's `installModelSelection` listener would otherwise re-apply the
- *   session's stored effort over the plugin's decision. Set
- *   `respectExplicitEffort: true` to yield to a stored selection instead.
+ *   session's stored effort over the plugin's decision.
  *
- * Every failure path returns the composed configuration unchanged. A plugin
- * that cannot read a model's capabilities must not be able to break a turn.
+ * Every failure path returns the composed configuration unchanged — except when
+ * the request carries the synthetic gear, which must never reach the adapter:
+ * then the effort is replaced by the route's own default, or dropped.
  *
  * @module dsh-auto-thinking-effort
  */
@@ -27,12 +42,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig, LlmRuntime, UserMessage } from '@deepseek-ai/dsh-llm'
+import { installAutoGear, requestsAutoGear } from './capability.ts'
+import type { AutoGear } from './capability.ts'
 import { classify } from './classify.ts'
 import type { Decision } from './classify.ts'
 import { Config, prepareConfig } from './config.ts'
 import type { ConfigShape, PreparedConfig } from './config.ts'
-import { resolveEffort } from './levels.ts'
-import type { LevelSpec } from './levels.ts'
+import { levelForScore, resolveEffort } from './levels.ts'
 import { AgentState } from './state.ts'
 
 /** Plugin name, used by the composition row and every log line. */
@@ -47,6 +63,8 @@ export const inject: string[] = []
 
 export { Config }
 export type { ConfigShape as AutoThinkingEffortConfig }
+export { installAutoGear, withAutoGear } from './capability.ts'
+export type { AutoGear } from './capability.ts'
 
 /** Everything one request decision needs, bundled to keep the handler flat. */
 interface RequestContext {
@@ -62,19 +80,34 @@ interface RequestContext {
 }
 
 /**
- * Install the plugin's listeners.
+ * Install the plugin's listeners and the synthetic gear.
  * @param ctx - plugin context; every registration is disposed with it.
  * @param config - validated plugin configuration.
  * @throws when the configuration is invalid (fail loud at load time).
  */
 export function apply(ctx: Context, config: ConfigShape): void {
   const prepared = prepareConfig(config)
-  if (!config.enabled) return
-
   const logger = ctx.logger(name)
+  const gear: AutoGear = {
+    id: config.autoEffortId,
+    name: config.autoEffortName,
+    description: config.autoEffortDescription,
+  }
+
   const states = new Map<string, AgentState>()
   const capabilities = new Map<string, Promise<string[] | undefined>>()
   const warned = new Set<string>()
+
+  // The gear is advertised only while the plugin is on; the sanitizer below
+  // stays registered either way so a session that still selects Auto after the
+  // plugin was disabled cannot send that id to a provider.
+  if (config.enabled) {
+    ctx.effect(() => installAutoGear(ctx, gear), 'auto-thinking-effort: Auto gear')
+    ctx.on('llm/adapters-updated', () => {
+      // A late-mounting or hot-reloaded LLM service gets the gear too.
+      installAutoGear(ctx, gear)
+    })
+  }
 
   const stateFor = (agent: Agent): AgentState => {
     const existing = states.get(agent.id)
@@ -94,6 +127,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
+    if (!config.enabled) return decision
+    // A subagent's route and effort belong to whoever spawned it: do not even
+    // classify. Its gear (if one was inherited) is still resolved below.
+    if (!config.applyToSubagents && payload.agent.session.header.origin === 'subagent') return decision
     try {
       observeTurn(config, prepared, stateFor(payload.agent), payload.turn, payload.messages)
     } catch (error) {
@@ -107,34 +144,39 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ctx.on('agent/request', async (payload, next) => {
     const resolved = await next()
     try {
-      if (config.applyToSubagents || payload.agent.session.header.origin !== 'subagent') {
-        return await decideEffort({
-          ctx,
-          config,
-          prepared,
-          state: stateFor(payload.agent),
-          capabilities,
-          warned,
-          logger,
-          turn: payload.turn,
-          step: payload.step,
-        }, resolved)
-      }
-      return resolved
+      const gearRequested = requestsAutoGear(resolved, config.autoEffortId)
+      const subagent = payload.agent.session.header.origin === 'subagent'
+      if (subagent && !config.applyToSubagents && !gearRequested) return resolved
+      return await decideEffort({
+        ctx,
+        config,
+        prepared,
+        state: stateFor(payload.agent),
+        capabilities,
+        warned,
+        logger,
+        turn: payload.turn,
+        step: payload.step,
+      }, resolved)
     } catch (error) {
       logger.warn('turn %d: effort selection failed, keeping the composed effort: %s', payload.turn, String(error))
       return resolved
     }
   }, { prepend: true })
 
-  logger.info(
-    'enabled — %d level(s) [%s], %d rule(s), dryRun=%s, subagents=%s',
-    prepared.levels.length,
-    prepared.levels.map((level) => `${level.id}→${level.effort}`).join(' '),
-    prepared.rules.length,
-    String(config.dryRun),
-    config.applyToSubagents ? 'on' : 'off',
-  )
+  if (config.enabled) {
+    logger.info(
+      'enabled — gear %s, %d level(s) [%s], %d rule(s), dryRun=%s, subagents=%s',
+      config.autoEffortId,
+      prepared.levels.length,
+      prepared.levels.map((level) => `${level.id}→${level.effort}`).join(' '),
+      prepared.rules.length,
+      String(config.dryRun),
+      config.applyToSubagents ? 'on' : 'off',
+    )
+  } else {
+    logger.info('disabled — only the %s sanitizer is active', config.autoEffortId)
+  }
 }
 
 /**
@@ -186,39 +228,56 @@ function extractUserText(messages: readonly UserMessage[]): string | undefined {
 
 /**
  * Resolve the turn's level against the routed model and rewrite the effort.
+ *
+ * Three request shapes reach this function:
+ *
+ * - the synthetic gear (always substituted — it must not reach the adapter),
+ * - no explicit effort with `autoWhenUnset` (classified like the gear, but left
+ *   alone when the turn was never observed),
+ * - a concrete effort (returned untouched: a manual choice wins).
+ *
  * @param context - the per-request decision context.
  * @param resolved - the configuration the loop would use without this plugin.
  * @returns the configuration to use; `resolved` itself when nothing changes.
  */
 async function decideEffort(context: RequestContext, resolved: LlmCallConfig): Promise<LlmCallConfig> {
   const { config, prepared, state, logger, turn, step } = context
-  const record = state.forTurn(turn)
-  if (record === undefined) return resolved
+  const gearRequested = requestsAutoGear(resolved, config.autoEffortId)
 
-  if (config.respectExplicitEffort && resolved.reasoningEffort !== undefined) {
-    warnOnce(context, `explicit:${resolved.provider}/${resolved.model}`, 'debug',
-      'turn %d: %s/%s already carries effort %s — left untouched (respectExplicitEffort)',
-      turn, resolved.provider, resolved.model, String(resolved.reasoningEffort))
-    return resolved
+  if (!config.enabled) {
+    // Only the sanitizer runs: a stored gear still must not reach the adapter.
+    if (!gearRequested) return resolved
+    const fallbackLevel = levelForScore(prepared.levels, 0)
+    const rungs = await supportedEfforts(context, resolved.provider, resolved.model)
+    const sanitized = rungs === undefined ? undefined : resolveEffort(prepared.levels, fallbackLevel, rungs)
+    return sanitized === undefined ? withoutEffort(resolved) : { ...resolved, reasoningEffort: ReasoningEffortId(sanitized.effort) }
   }
+  const auto = gearRequested || (resolved.reasoningEffort === undefined && config.autoWhenUnset)
+  if (!auto) return resolved
 
-  const level: LevelSpec | undefined = prepared.levels.find((candidate) => candidate.id === record.level)
-  if (level === undefined) return resolved
+  const record = state.forTurn(turn)
+  if (record === undefined && !gearRequested) return resolved
+  const level = record === undefined
+    ? levelForScore(prepared.levels, 0)
+    : prepared.levels.find((candidate) => candidate.id === record.level) ?? levelForScore(prepared.levels, 0)
 
   const supported = await supportedEfforts(context, resolved.provider, resolved.model)
-  if (supported === undefined) {
-    warnOnce(context, `unknown:${resolved.provider}/${resolved.model}`, 'warn',
-      'turn %d: %s/%s declares no selectable reasoning efforts — effort left at the composed value',
-      turn, resolved.provider, resolved.model)
-    return resolved
+  if (supported === undefined || supported.length === 0) {
+    // No selectable rung on this route: a gear must still be removed.
+    warnOnce(context, `no-efforts:${resolved.provider}/${resolved.model}`, 'warn',
+      'turn %d: %s/%s declares no selectable reasoning efforts — %s',
+      turn, resolved.provider, resolved.model,
+      gearRequested ? 'the Auto gear is dropped from the request' : 'effort left at the composed value')
+    return gearRequested ? withoutEffort(resolved) : resolved
   }
 
   const resolution = resolveEffort(prepared.levels, level, supported)
   if (resolution === undefined) {
     warnOnce(context, `ladder:${resolved.provider}/${resolved.model}`, 'warn',
-      'turn %d: %s/%s supports [%s], which shares no rung with the configured ladder — effort left unchanged',
-      turn, resolved.provider, resolved.model, supported.join(' '))
-    return resolved
+      'turn %d: %s/%s supports [%s], which shares no rung with the configured ladder — %s',
+      turn, resolved.provider, resolved.model, supported.join(' '),
+      gearRequested ? 'the Auto gear is dropped from the request' : 'effort left unchanged')
+    return gearRequested ? withoutEffort(resolved) : resolved
   }
 
   const changed = resolved.reasoningEffort !== resolution.effort
@@ -229,11 +288,11 @@ async function decideEffort(context: RequestContext, resolved: LlmCallConfig): P
       step,
       level.id,
       resolution.effort,
-      record.pinned ? 'pinned' : record.origin,
+      record === undefined ? 'default' : record.pinned ? 'pinned' : record.origin,
       changed ? `, was ${String(resolved.reasoningEffort)}` : ', unchanged',
       resolution.clamped ? ', clamped to the nearest supported rung' : '',
-      record.score,
-      record.reasons.length === 0 ? '' : ` — ${record.reasons.join('; ')}`,
+      record?.score ?? 0,
+      record === undefined || record.reasons.length === 0 ? '' : ` — ${record.reasons.join('; ')}`,
     )
   }
   if (config.dryRun || !changed) return resolved
@@ -241,12 +300,23 @@ async function decideEffort(context: RequestContext, resolved: LlmCallConfig): P
 }
 
 /**
+ * Drop the effort field, restoring the provider's own default.
+ * @param config - the composed configuration.
+ * @returns a copy without `reasoningEffort`.
+ */
+function withoutEffort(config: LlmCallConfig): LlmCallConfig {
+  const { reasoningEffort: _dropped, ...rest } = config
+  return rest
+}
+
+/**
  * Read the effort ids one exact route declares, cached per route.
  * @param context - the per-request decision context.
  * @param provider - provider route.
  * @param model - exact model id.
- * @returns the declared effort ids, or `undefined` when the route declares none
- * (or no LLM runtime is mounted, or the lookup failed).
+ * @returns the declared effort ids without the synthetic gear, or `undefined`
+ * when the route declares none (or no LLM runtime is mounted, or the lookup
+ * failed).
  */
 async function supportedEfforts(context: RequestContext, provider: string, model: string): Promise<string[] | undefined> {
   const key = `${provider}\u0000${model}`
@@ -259,7 +329,9 @@ async function supportedEfforts(context: RequestContext, provider: string, model
       const info = await llm.resolveModelInfo(provider, model)
       const efforts = info.reasoning?.efforts
       if (efforts === undefined) return undefined
-      const ids = efforts.map((effort) => String(effort.id))
+      // The gear is advertised through the same call this plugin patched; it is
+      // not a rung and must not distort clamping.
+      const ids = efforts.map((effort) => String(effort.id)).filter((id) => id !== context.config.autoEffortId)
       return ids.length === 0 ? undefined : ids
     } catch (error) {
       context.logger.warn('model capability lookup failed for %s/%s: %s', provider, model, String(error))

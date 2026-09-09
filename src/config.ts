@@ -4,8 +4,9 @@
  * The knobs are grouped by the question they answer:
  *
  * - *What counts as how much thinking* — `levels`, `builtinRules`, `rules`.
- * - *What to do with the answer* — `enabled`, `dryRun`, `applyToSubagents`,
- *   `respectExplicitEffort`.
+ * - *How the gear is presented* — `autoEffortId`, `autoEffortName`,
+ *   `autoEffortDescription`, `autoWhenUnset`.
+ * - *What to do with the answer* — `enabled`, `dryRun`, `applyToSubagents`.
  * - *How loud to be* — `logDecisions`, `maxChars`.
  *
  * Validation is fail-loud at load time: a bad regex, an unknown level id, or a
@@ -22,7 +23,7 @@ import type { CompiledRule, RuleSpec } from './signals.ts'
 
 /** Plugin configuration. */
 export interface ConfigShape {
-  /** Master switch; a disabled row registers nothing. */
+  /** Master switch; a disabled row registers nothing but the gear sanitizer. */
   enabled: boolean
   /** Decide and log, but never rewrite the request. */
   dryRun: boolean
@@ -32,12 +33,18 @@ export interface ConfigShape {
   builtinRules: boolean
   /** Extra signal rules, evaluated after the built-in ones. */
   rules: RuleSpec[]
+  /** Synthetic effort id contributed to the model picker. */
+  autoEffortId: string
+  /** Label shown for the synthetic gear. */
+  autoEffortName: string
+  /** One-line explanation shown for the synthetic gear. */
+  autoEffortDescription: string
+  /** Treat a request with no explicit effort as auto too. */
+  autoWhenUnset: boolean
   /** Whether subagent child sessions are classified too. */
   applyToSubagents: boolean
   /** Keep the previous level when a message only asks to continue. */
   inheritOnContinuation: boolean
-  /** Leave a request that already carries an explicit effort untouched. */
-  respectExplicitEffort: boolean
   /** Log every decision at info level. */
   logDecisions: boolean
   /** Maximum characters of user text inspected per turn. */
@@ -61,9 +68,12 @@ export const Config: z<ConfigShape> = z.object({
     flags: z.string(),
     note: z.string(),
   })).default([]),
-  inheritOnContinuation: z.boolean().default(true),
+  autoEffortId: z.string().default('auto'),
+  autoEffortName: z.string().default('Auto'),
+  autoEffortDescription: z.string().default('Pick the effort per turn from your message'),
+  autoWhenUnset: z.boolean().default(true),
   applyToSubagents: z.boolean().default(false),
-  respectExplicitEffort: z.boolean().default(false),
+  inheritOnContinuation: z.boolean().default(true),
   logDecisions: z.boolean().default(true),
   maxChars: z.number().default(8_000),
 })
@@ -103,6 +113,12 @@ export function prepareConfig(config: ConfigShape): PreparedConfig {
   assertLevels(levels)
   if (!Number.isInteger(config.maxChars) || config.maxChars < 32) {
     throw new RangeError(`auto-thinking-effort: maxChars must be an integer >= 32, got ${String(config.maxChars)}`)
+  }
+  if (config.autoEffortId.trim() === '') {
+    throw new TypeError('auto-thinking-effort: autoEffortId must not be empty')
+  }
+  if (config.autoEffortName.trim() === '') {
+    throw new TypeError('auto-thinking-effort: autoEffortName must not be empty')
   }
   const known = new Set(levels.map((level) => level.id))
   const strongest = (levels[levels.length - 1] as LevelSpec).id

@@ -12,34 +12,42 @@
 #
 # ── What the row does ────────────────────────────────────────────────────────
 #
-# It mounts on the HOST plane and registers two listeners:
+# It mounts on the HOST plane and registers:
 #
-#   * `agent/pre-step`  — classify the turn's user message into a level.
-#   * `agent/request`   — rewrite `reasoningEffort` on the composed request.
+#   * a synthetic **Auto** gear in every route that advertises efforts
+#     (`ctx.llm.resolveModelInfo` / `resolveCallConfig` wrappers, see
+#     src/capability.ts), so the model picker shows `Auto, off, low, high, max`;
+#   * `agent/pre-step`  — classify the turn's user message into a level;
+#   * `agent/request`   — turn the Auto gear into a real effort for that turn.
 #
-# Host plane is the correct place for both. They are dispatch seams, not realm
-# services: `agent/pre-step` and `agent/request` are scope-filtered events, so a
-# root-plane listener observes every agent (and every subagent) without joining
-# any isolate. Nothing here needs `ctx.compaction`, `ctx.tools`, or any other
-# realm-scoped service; `ctx.llm` is read lazily and only for model capability.
+# Host plane is the correct place for all three. The listeners are dispatch
+# seams, not realm services: `agent/pre-step` and `agent/request` are
+# scope-filtered events, so a root-plane listener observes every agent (and
+# every subagent) without joining any isolate. The gear wrappers only touch the
+# live `llm` service instance; `prepareCall` is deliberately left unpatched so a
+# gear id that outlives the plugin fails loudly instead of reaching a provider.
 #
-# ── Precedence (read before debugging "it did not change my effort") ─────────
+# ── How a user drives it ─────────────────────────────────────────────────────
 #
-# The listener is registered with `prepend: true`, so it is the OUTERMOST
-# `agent/request` listener and its returned configuration is the one the loop
-# uses. That matters because the Web entry point installs
-# `installModelSelection` on each agent-scoped context, which re-applies the
-# session's stored effort (from `settings.yaml` → `agent-default-model.
-# reasoningEffort`, or from the GUI model picker) over the composed request. With
-# the plugin enabled, the classified level wins; set `respectExplicitEffort:
-# true` to hand control back to the stored selection.
+# | Session selection        | Behaviour                                  |
+# |--------------------------|--------------------------------------------|
+# | `Auto` (the gear)        | this plugin decides every turn             |
+# | no explicit effort       | this plugin decides every turn (`autoWhenUnset`) |
+# | `off`/`low`/`high`/`max` | untouched — a manual choice always wins    |
+#
+# A manual gear therefore needs no extra mechanism: the plugin only acts when
+# the request asks for the gear (or carries no effort at all). Set
+# `autoWhenUnset: false` to make "no effort" mean the provider default instead.
+#
+# The gear must never reach a provider: `agent/request` substitutes it before
+# `prepareCall` runs. If the plugin is disabled while a session still selects
+# Auto, the sanitizer below (registered even when disabled) still replaces it.
 #
 # ── Scope of the change ─────────────────────────────────────────────────────
 #
 # Only `reasoningEffort` is touched. Provider, model, prompt, and message list
 # are never modified, so a decision can at worst cost a different amount of
-# thinking, never a different conversation. A route that declares no selectable
-# efforts is left completely alone.
+# thinking, never a different conversation.
 - insert:
     - id: auto-thinking-effort
       name: 'dsh-auto-thinking-effort'
@@ -50,7 +58,9 @@
         dryRun: false
         # Subagents carry their own route and effort chosen by the caller;
         # leave them alone unless you deliberately want them classified too.
+        # An inherited Auto gear is still resolved (it must not reach a provider).
         applyToSubagents: false
-        # When true, a request that already carries an explicit effort (the
-        # session's model selection) is never overridden.
-        respectExplicitEffort: false
+        # The synthetic picker entry.
+        autoEffortId: auto
+        autoEffortName: Auto
+        autoEffortDescription: 每轮按提问自动选择档位

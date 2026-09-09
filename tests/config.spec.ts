@@ -19,7 +19,9 @@ describe('Config defaults', () => {
     expect(config.builtinRules).toBe(true)
     expect(config.inheritOnContinuation).toBe(true)
     expect(config.applyToSubagents).toBe(false)
-    expect(config.respectExplicitEffort).toBe(false)
+    expect(config.autoEffortId).toBe('auto')
+    expect(config.autoEffortName).toBe('Auto')
+    expect(config.autoWhenUnset).toBe(true)
     expect(config.logDecisions).toBe(true)
     expect(config.maxChars).toBe(8_000)
     expect(config.rules).toEqual([])
@@ -48,6 +50,11 @@ describe('prepareConfig validation', () => {
 
   it('rejects a rule pinning an unknown level', () => {
     expect(() => prepareConfig(parsed({ rules: [{ pattern: 'x', level: 'nope' }] }))).toThrow(/unknown level/)
+  })
+
+  it('rejects an empty gear id or name', () => {
+    expect(() => prepareConfig(parsed({ autoEffortId: ' ' }))).toThrow(/autoEffortId/)
+    expect(() => prepareConfig(parsed({ autoEffortName: '' }))).toThrow(/autoEffortName/)
   })
 
   it('accepts a rule pinning a configured custom level', () => {

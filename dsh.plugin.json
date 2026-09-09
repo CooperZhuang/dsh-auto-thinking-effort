@@ -1,8 +1,8 @@
 {
   "id": "dsh-external/dsh-auto-thinking-effort",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "main": "./lib/index.js",
-  "description": "根据问题自动选择推理思考档位（启发式分类 → adapter 支持的 effort，自动钳制）",
+  "description": "自动档位（Auto）：每轮按提问选择推理 effort；手动档位（off/low/high/max）保持不变",
   "engines": {
     "dsh": ">=0.1.2-rc.1"
   },

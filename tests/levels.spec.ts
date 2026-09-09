@@ -58,26 +58,47 @@ describe('effortLadder', () => {
 })
 
 describe('resolveEffort', () => {
+  const ladder: LevelSpec[] = [...DEFAULT_LEVELS]
+  const minimal = ladder[0] as LevelSpec
+  const low = ladder[1] as LevelSpec
+  const high = ladder[2] as LevelSpec
+  const max = ladder[3] as LevelSpec
+
   it('uses the exact requested rung when the route declares it', () => {
-    expect(resolveEffort(DEFAULT_LEVELS, DEFAULT_LEVELS[3] as LevelSpec, ['off', 'low', 'high', 'max']))
-      .toEqual({ effort: 'max', clamped: false })
+    expect(resolveEffort(ladder, max, ['off', 'low', 'high', 'max'])).toEqual({ effort: 'max', clamped: false })
+    expect(resolveEffort(ladder, high, ['off', 'low', 'high', 'max'])).toEqual({ effort: 'high', clamped: false })
   })
 
-  it('clamps to the nearest declared rung', () => {
-    const low = DEFAULT_LEVELS[1] as LevelSpec
-    expect(resolveEffort(DEFAULT_LEVELS, low, ['off', 'high', 'max'])).toEqual({ effort: 'high', clamped: true })
+  it('lifts a request below the floor up to the floor', () => {
+    // `minimal` asks for off; the low floor removes it from the pool.
+    expect(resolveEffort(ladder, minimal, ['off', 'low', 'high', 'max'], { floor: low }))
+      .toEqual({ effort: 'low', clamped: true })
   })
 
-  it('prefers the stronger rung on a tie', () => {
-    const ladder: LevelSpec[] = [
-      { id: 'a', effort: 'one', maxScore: 0 },
-      { id: 'b', effort: 'two', maxScore: 5 },
-      { id: 'c', effort: 'three' },
-    ]
-    expect(resolveEffort(ladder, ladder[1] as LevelSpec, ['one', 'three'])).toEqual({ effort: 'three', clamped: true })
+  it('answers a sparse ladder from the floor side, never from the request side', () => {
+    // ['off','max'] with a low floor: off is excluded, so the pool is ['max'].
+    expect(resolveEffort(ladder, low, ['off', 'max'], { floor: low })).toEqual({ effort: 'max', clamped: true })
+  })
+
+  it('falls back to the whole declared set when the route tops out below the floor', () => {
+    expect(resolveEffort(ladder, low, ['off'], { floor: low })).toEqual({ effort: 'off', clamped: true })
+  })
+
+  it('drops the floor when it is set to the ladder minimum', () => {
+    expect(resolveEffort(ladder, minimal, ['off', 'low', 'high'], { floor: minimal }))
+      .toEqual({ effort: 'off', clamped: false })
+  })
+
+  it('takes the highest rung not exceeding an unsupported request', () => {
+    // `high` is not declared; the pool keeps everything at or below it.
+    expect(resolveEffort(ladder, high, ['off', 'low', 'max'], { floor: low })).toEqual({ effort: 'low', clamped: true })
   })
 
   it('returns undefined when the route shares no rung with the ladder', () => {
-    expect(resolveEffort(DEFAULT_LEVELS, DEFAULT_LEVELS[2] as LevelSpec, ['tiny', 'huge'])).toBeUndefined()
+    expect(resolveEffort(ladder, high, ['tiny', 'huge'])).toBeUndefined()
+  })
+
+  it('returns undefined when the level effort is not on the ladder', () => {
+    expect(resolveEffort(ladder, { id: 'x', effort: 'nope' }, ['off', 'low'])).toBeUndefined()
   })
 })

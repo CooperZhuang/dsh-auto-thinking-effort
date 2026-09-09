@@ -42,6 +42,13 @@ export interface RuleSpec {
   level?: string
   /** `RegExp` flags; default `i`. `g` and `y` are rejected. */
   flags?: string
+  /**
+   * Match against prose only — fenced blocks, inline code, and XML/HTML tags
+   * are stripped first. Pin rules default to `true` (a keyword inside a code
+   * block or a path must not change behaviour); score rules default to `false`
+   * so pasted error text still counts as evidence.
+   */
+  proseOnly?: boolean
   /** Human-readable reason recorded in logs and decisions. */
   note?: string
 }
@@ -54,6 +61,8 @@ export interface CompiledRule {
   readonly weight: number
   /** Level id to pin, when this rule pins. */
   readonly level: string | undefined
+  /** Whether the pattern is matched against prose-stripped text. */
+  readonly proseOnly: boolean
   /** Reason recorded when the rule fires. */
   readonly note: string
 }
@@ -61,7 +70,7 @@ export interface CompiledRule {
 /** The shipped rules, in evaluation order. Pins come first. */
 export const BUILTIN_RULES: readonly RuleSpec[] = Object.freeze([
   {
-    pattern: '\\bthink (?:hard|harder|deeply|carefully|really hard)\\b|深入(?:思考|分析|研究)|仔细(?:想|分析|研究|推敲)|认真(?:想|分析)|想清楚|好好(?:想|分析)|(?:用|要)(?:最高|最大|最强)(?:的)?(?:思考|推理|档位)|thorough(?:ly)? (?:analy[sz]e|review|investigate)|max(?:imum)? (?:thinking|reasoning|effort)',
+    pattern: '\\bultrathink\\b|\\bthink (?:hard|harder|deeply|carefully|really hard)\\b|深入(?:思考|分析|研究)|仔细(?:想|分析|研究|推敲)|认真(?:想|分析)|想清楚|好好(?:想|分析)|(?:用|要)(?:最高|最大|最强)(?:的)?(?:思考|推理|档位)|thorough(?:ly)? (?:analy[sz]e|review|investigate)|max(?:imum)? (?:thinking|reasoning|effort)',
     level: STRONGEST_LEVEL,
     note: 'user asked for maximum thinking',
   },
@@ -127,7 +136,7 @@ export const BUILTIN_RULES: readonly RuleSpec[] = Object.freeze([
   },
   {
     pattern: '\\b(?:thanks|thank you|nice|cool|great|got it|sounds good|sure|perfect)\\b|谢谢|好的|收到|明白|可以|不错|辛苦了',
-    weight: -4,
+    weight: -2,
     note: 'acknowledgement or chit-chat',
   },
 ])
@@ -139,7 +148,8 @@ const REJECTED_FLAGS = /[gy]/
  * Compile configured rules once, at load time.
  *
  * `g` and `y` are rejected rather than tolerated: a stateful `lastIndex` turns
- * a pure classifier into one whose answer depends on call order.
+ * a pure classifier into one whose answer depends on call order. Pin rules
+ * default to prose-only matching; see {@link RuleSpec.proseOnly}.
  *
  * @param specs - built-in and configured rules, in evaluation order.
  * @returns the compiled rules.
@@ -163,6 +173,12 @@ export function compileRules(specs: readonly RuleSpec[]): CompiledRule[] {
       throw new SyntaxError(`auto-thinking-effort: ${label}.pattern does not compile: ${String(error)}`, { cause: error })
     }
     const note = spec.note ?? `matched /${spec.pattern}/`
-    return { regex, weight, level: spec.level, note: note.slice(0, 120) }
+    return {
+      regex,
+      weight,
+      level: spec.level,
+      proseOnly: spec.proseOnly ?? spec.level !== undefined,
+      note: note.slice(0, 120),
+    }
   })
 }

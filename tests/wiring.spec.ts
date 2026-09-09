@@ -151,11 +151,35 @@ describe('Auto gear', () => {
     expect((await h.request(1)).reasoningEffort).toBeUndefined()
   })
 
-  it('clamps a gear decision to the nearest declared rung', async () => {
+  it('clamps a gear decision to the allowed rungs', async () => {
     // `please do it` scores into the `low` band; this route has no `low`.
     const h = harness({ efforts: ['off', 'high', 'max'], selectedEffort: GEAR })
     await h.preStep(1, [userMessage('please do it')])
     expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('lifts the lowest band up to the configured floor', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('git status')])
+    expect((await h.request(1)).reasoningEffort).toBe('low')
+  })
+
+  it('lets the floor be removed explicitly', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { autoFloorLevel: 'minimal' } })
+    await h.preStep(1, [userMessage('git status')])
+    expect((await h.request(1)).reasoningEffort).toBe('off')
+  })
+
+  it('keeps a heavy score-derived decision under the ceiling', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('Why does the whole codebase deadlock under concurrency? Analyze the regression, prove the invariant, and design a migration across all files.')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('lets an explicit pin reach the top rung', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('ultrathink about the deadlock')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
   })
 
   it('substitutes the gear for a subagent too, even when subagents are skipped', async () => {
@@ -236,10 +260,10 @@ describe('turn state', () => {
   it('keeps a turn at its level across steps', async () => {
     const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('谢谢')], 1)
-    expect((await h.request(1, 1)).reasoningEffort).toBe('off')
+    expect((await h.request(1, 1)).reasoningEffort).toBe('low')
     // A later step in the same turn carries only a plugin-injected tool result.
     await h.preStep(1, [pluginMessage('tool result')], 2)
-    expect((await h.request(1, 2)).reasoningEffort).toBe('off')
+    expect((await h.request(1, 2)).reasoningEffort).toBe('low')
   })
 
   it('raises, but never lowers, a turn on steering', async () => {
@@ -252,12 +276,13 @@ describe('turn state', () => {
     expect((await h.request(1, 3)).reasoningEffort).toBe('max')
   })
 
-  it('inherits the previous level for a bare continuation', async () => {
+  it('inherits the previous level for a bare continuation, capped by the ceiling', async () => {
     const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('think hard about the deadlock')], 1)
     expect((await h.request(1, 1)).reasoningEffort).toBe('max')
+    // The pin applied to turn 1 only; the continuation stays under the ceiling.
     await h.preStep(2, [userMessage('继续')], 1)
-    expect((await h.request(2, 1)).reasoningEffort).toBe('max')
+    expect((await h.request(2, 1)).reasoningEffort).toBe('high')
   })
 
   it('does nothing when the plugin is disabled and no gear is involved', async () => {

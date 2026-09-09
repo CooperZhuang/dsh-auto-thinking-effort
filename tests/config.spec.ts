@@ -22,6 +22,8 @@ describe('Config defaults', () => {
     expect(config.autoEffortId).toBe('auto')
     expect(config.autoEffortName).toBe('Auto')
     expect(config.autoWhenUnset).toBe(true)
+    expect(config.autoFloorLevel).toBe('low')
+    expect(config.autoCeilingLevel).toBe('high')
     expect(config.logDecisions).toBe(true)
     expect(config.maxChars).toBe(8_000)
     expect(config.rules).toEqual([])
@@ -57,15 +59,34 @@ describe('prepareConfig validation', () => {
     expect(() => prepareConfig(parsed({ autoEffortName: '' }))).toThrow(/autoEffortName/)
   })
 
+  it('rejects a floor or ceiling that names no configured level', () => {
+    expect(() => prepareConfig(parsed({ autoFloorLevel: 'nope' }))).toThrow(/autoFloorLevel/)
+    expect(() => prepareConfig(parsed({ autoCeilingLevel: 'nope' }))).toThrow(/autoCeilingLevel/)
+  })
+
+  it('rejects a floor ranked above the ceiling', () => {
+    expect(() => prepareConfig(parsed({ autoFloorLevel: 'max', autoCeilingLevel: 'low' }))).toThrow(/must not rank above/)
+  })
+
+  it('resolves the configured bounds', () => {
+    const prepared = prepareConfig(parsed())
+    expect(prepared.floor.id).toBe('low')
+    expect(prepared.ceiling.id).toBe('high')
+  })
+
   it('accepts a rule pinning a configured custom level', () => {
     const prepared = prepareConfig(parsed({
       levels: [
         { id: 'calm', effort: 'off', maxScore: 0 },
         { id: 'storm', effort: 'max' },
       ],
+      autoFloorLevel: '$weakest',
+      autoCeilingLevel: '$strongest',
       rules: [{ pattern: 'x', level: 'storm' }],
     }))
     expect(prepared.levels.map((level) => level.id)).toEqual(['calm', 'storm'])
+    expect(prepared.floor.id).toBe('calm')
+    expect(prepared.ceiling.id).toBe('storm')
   })
 })
 

@@ -57,6 +57,18 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 - **The default band must stay the provider's normal effort**, not the cheapest.
   Classification reads shape, not meaning; the asymmetric cost of a wrong guess
   is the reason (`docs/design.md` D3).
+- **`auto` never turns thinking off by default, and score-derived decisions
+  never reach the top rung.** `autoFloorLevel` (default `low`) and
+  `autoCeilingLevel` (default `high`) encode oh-my-pi's policy; only an explicit
+  pin bypasses the ceiling. Do not "simplify" these away (`docs/design.md`
+  D13/D14).
+- **Pins match prose only.** `stripNonProse` removes fenced blocks, inline code,
+  comments, and tags before pin matching; weighted rules keep the raw text so
+  pasted error output still counts (D15). A pin firing from inside code is a
+  bug, not a feature.
+- **Clamping answers from the floor side.** The pool is filtered by the floor
+  first and the request only picks within it; nearest-rung matching was removed
+  because it violates the floor on sparse ladders (D16).
 
 ## Conventions
 

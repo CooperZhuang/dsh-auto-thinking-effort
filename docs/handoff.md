@@ -7,8 +7,9 @@
 
 ## 0. 一句话现状
 
-插件 **v0.2.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
-已单测、已真机验证（含真实 web profile 的 GUI）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
+插件 **v0.3.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
+边界借鉴 oh-my-pi：**默认不低于 `low`、分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）、pin 只在正文匹配、钳制从下限一侧回答**（见 `docs/design.md` D13–D17）。
+已单测（91 个）、已真机验证（含真实 web profile 的 GUI）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
@@ -33,7 +34,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 |---|---|
 | GitHub | https://github.com/CooperZhuang/dsh-auto-thinking-effort （public） |
 | 本地 | `C:\CodeRepository\dsh-auto-thinking-effort` |
-| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.2.0`（**未发布**） |
+| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.3.0`（**未发布**） |
 | Node / pnpm | v24.16.0 / 12.3.4（`packageManager` 已钉） |
 | DSH 依赖 | **`0.1.2-rc.1`**（npm `next` dist-tag，不是 `latest`） |
 | DSH CLI | `C:\Users\Cooper\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` |
@@ -49,9 +50,9 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 |---|---|
 | `src/capability.ts` | **Auto 档位注入**：包 `resolveModelInfo`（插入 auto + 设为 advertised default）、`resolveCallConfig`（放行 auto）、`agentDefaultModel.saveSelection`（落盘剥掉 auto）；`withAutoGear` / `requestsAutoGear` / `routeOffersEfforts` 纯函数 |
 | `src/config.ts` | schemastery schema + `resolveConfig`（输入可省略）+ `prepareConfig`（校验 + 编译规则 + 解析 `$strongest`/`$weakest`） |
-| `src/levels.ts` | `DEFAULT_LEVELS` 分数带、`assertLevels`、`levelForScore`、`effortLadder`、`resolveEffort`（钳制） |
-| `src/signals.ts` | `BUILTIN_RULES`（pin + 加权，中英双语）、`compileRules`（拒绝 `g`/`y`） |
-| `src/classify.ts` | `classify`（pin → 加权 → 结构特征 → 分数带 → 裸接续继承）、`truncateForClassification`（头 60% + 尾 40%） |
+| `src/levels.ts` | `DEFAULT_LEVELS` 分数带、`assertLevels`、`levelForScore`、`effortLadder`、`resolveEffort`（**下限池 + 取不超过请求的最高档**） |
+| `src/signals.ts` | `BUILTIN_RULES`（pin + 加权，中英双语）、`compileRules`（拒绝 `g`/`y`，pin 默认 `proseOnly`） |
+| `src/classify.ts` | `classify`（pin → 加权 → 结构特征 → 分数带 → 裸接续继承 → **天花板**）、`stripNonProse`、`truncateForClassification` |
 | `src/state.ts` | `AgentState`：轮状态、steering 只升不降、`forTurn` 只认同一轮 |
 | `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读，子代理默认跳过）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；disabled 时只做兜底改写） |
 | `scripts/inspect-session.mjs` | 逐帧解 `session.jsonl.zstd` 并打印关键事件（**多帧！**） |
@@ -91,6 +92,9 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | **GUI：Auto → 每轮自动** | 选 Auto，发"谢谢" | `model/selection` 记 `reasoningEffort:"auto"`；请求头 `"off"` | `session-11eeae50` |
 | **GUI：手动档位不被覆盖** | 同会话改选 `Low`，发"深入思考一下：…"（本会判 max） | 请求头仍是 `"low"` —— **同一会话两条不同 header** | `session-11eeae50` |
 | **GUI：Auto 不污染全局默认** | 选 Auto 后看 `settings.yaml` | `agent-default-model` 无 `reasoningEffort` | `~/.dsh/settings.yaml` |
+| 真机：下限生效（v0.3） | `dsh --profile headless "git status"` | `"low"`（v0.2 是 `off`） | `session-4987185c` |
+| 真机：pin 越过天花板（v0.3） | `dsh --profile headless "深入思考一下：…"` | `"max"` | `session-a82f0524` |
+| 真机：天花板挡住高分（v0.3） | 无 pin 的重负载长文本 | `"high"` | `session-771ee9b3` |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`：真 cordis Context + 真 `installModelSelection` + 真 waterfall，且**故意先注册 selection**）：
 
@@ -166,12 +170,14 @@ dsh --profile headless "深入思考一下：为什么…"
 
 ## 9. 交接清单
 
-- [x] 代码 + 单测（77 个）+ CI workflow
+- [x] 代码 + 单测（91 个）+ CI workflow
 - [x] Auto 档位注入（D10）与"手动优先"（D11）与全局默认守卫（D12）
-- [x] 真机挂载与四种请求头证据（含对照组）
+- [x] 边界策略对齐 oh-my-pi（D13 下限 / D14 上限 / D15 pin 只在正文 / D16 钳制方向 / D17 不抄模型分类）
+- [x] 真机挂载与请求头证据（含对照组）
 - [x] **GUI 真机验证**：Auto 出现并可选中、每轮自动、手动不被覆盖、默认不被污染
+- [x] v0.3 三条新真机证据（下限 / pin 越天花板 / 天花板挡高分）
 - [x] 装进用户的 `web` profile（bundle 已追加；重启后生效）
-- [x] 设计决策与证据位置（`docs/design.md` D1–D12）
-- [x] 中英 README，含"真机验证 / 仅单测 / 未验证"三张表
+- [x] 设计决策与证据位置（`docs/design.md` D1–D17）
+- [x] 中英 README，含"真机验证 / 仅单测 / 未验证"三张表 + oh-my-pi 对比表
 - [ ] 真实子代理跳过验证（U2）
 - [ ] 发布到 npm

@@ -167,13 +167,69 @@
 
 ---
 
+## D13 — 下限：`auto` 不把思考关掉
+
+**决定**：`autoFloorLevel` 默认 `low`。`auto` 判到 `minimal`（客套、机械操作）时，实际 effort 被抬到 `low`；把该值设成阶梯最弱那一档（或 `$weakest`）才允许到 `off`。
+
+**理由**：参考 oh-my-pi 的 `clampAutoThinkingEffort`——它的注释写得很直接："`auto` never resolves below Low"。在编码场景里，"省下一点思考 token"换不回一次答错的代价；而"关掉思考"恰恰是用户最不可能想要的自动行为。
+
+**证据**：`src/levels.ts` 的 `resolveEffort` 的 `floor` 选项；`tests/levels.spec.ts` 的下限用例；真机 `dsh --profile headless "git status"` → `low`（`session-4987185c`，此前是 `off`）。
+
+---
+
+## D14 — 上限：分数算出来的档位不进最高档
+
+**决定**：`autoCeilingLevel` 默认 `high`。`classify` 选出的档位若高于天花板就压到天花板；**pin 不受约束**。
+
+**理由**：同样是 oh-my-pi 的策略——`providers.autoThinkingMaxEffort` 默认 `xhigh`，"keeps the classifier one tier below the top, so only `ultrathink` reaches `max`"。把最高档留给"用户明确要求"这一种情况，让启发式的误判成本有上界。
+
+**代价（明说）**：一个确实很难、但用户没写"深入思考"的问题，现在最多到 `high`。这是有意的取舍：宁可让用户多说一句，也不让正则决定要不要烧最高档。
+
+**证据**：`src/classify.ts` 的 ceiling 应用（附 `capped at <id>` 理由）；`tests/classify.spec.ts`、`tests/wiring.spec.ts`；真机无 pin 的重负载文本 → `high`（`session-771ee9b3`），而 pin 的同一类问题 → `max`（`session-a82f0524`）。
+
+---
+
+## D15 — pin 只在正文里匹配
+
+**决定**：pin 规则默认 `proseOnly: true`——先剥掉围栏代码块、行内代码、HTML 注释与标签，再匹配。加权规则仍匹配原文。
+
+**理由**：来自 oh-my-pi 的 magic-keyword 匹配规则（"Fenced code blocks … inline code spans, HTML/XML comments/tags/elements, and their contents are ignored"，且 `orchestrate.ts`、`foo::orchestrate`、`orchestrate()` 都不触发）。pin 是**改变行为**的开关，被代码或路径误触发是不可接受的；而加权规则要的恰恰相反——粘贴的 `TypeError` 必须算证据。
+
+**代价**：代码块里的关键词不再 pin（这正是目的）；`stripNonProse` 用正则剥，未闭合的围栏不剥（可接受）。
+
+**证据**：`src/classify.ts` 的 `stripNonProse`；`tests/classify.spec.ts` 的"ignores a pin keyword inside code"。
+
+---
+
+## D16 — 钳制方向：从下限一侧回答，不从请求一侧
+
+**决定**：`resolveEffort` 先按下限筛出合法池（池空则回落到全部声明档位），再取**池里不超过请求的最高档**；请求低于整个池时取池的最低档。
+
+**理由**：旧实现取"阶梯上最近的档位"，在稀疏阶梯上会向下跳。oh-my-pi 的注释点出了根因：*"capping the request alone is not enough, because a sparse ladder snaps an excluded request back up"*——反过来也成立：按距离取最近会让一个 `low` 请求在 `["off","max"]` 上落到 `off`，直接违反下限。下限是硬约束，请求只是偏好。
+
+**证据**：`src/levels.ts` 的 `resolveEffort`；`tests/levels.spec.ts` 的稀疏阶梯用例（`low` + `['off','max']` + floor=low → `max`）。
+
+---
+
+## D17 — 分类器继续用启发式（明确不抄 oh-my-pi 的部分）
+
+**决定**：不引入模型分类。只借鉴它的**边界策略**（D13–D16）。
+
+**理由**：oh-my-pi 的分类器是一次真实的模型调用（`classifyOnline` / `classifyLocal`），每轮都要等它返回才能发请求；他们用 `tiny`/`smol` 角色、本地 on-device 模型、`retryTransientCompletion` 和 provisional level 来摊薄代价。我们按 D1 把"零延迟、确定性、可复现"放在首位，因此只抄那些**不增加调用**的部分。
+
+**如果将来要加**（接 U4）：DSH 有现成旁路——`purpose: 'session-title' | 'compaction'` 的调用不经过 `agent/request`，可以做成"低优先级、可关闭、失败回退启发式"的异步预取；他们"失败就抛错、由调用方回落"的做法是正确姿势。
+
+**证据**：[oh-my-pi classifier.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts)、[thinking.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/thinking.ts)、[分类器 prompt](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/auto-thinking-difficulty.md)。
+
+---
+
 ## 未定 / 开放问题
 
 | 编号 | 问题 | 现状 |
 |---|---|---|
 | U2 | 真实子代理会话的跳过行为 | 只在进程内用假 header 测过（`applyToSubagents: false`） |
 | U3 | 非 DeepSeek provider 的钳制路径 | 只用假 `resolveModelInfo` 测过 |
-| U4 | 是否要一条可选的模型分类兜底（D1） | 不做；若要做，必须在 `agent/pre-step` 之外异步预取，且失败时回退启发式 |
+| U4 | 是否要一条可选的模型分类兜底（D1） | 不做（见 D17）；若要做，必须在 `agent/pre-step` 之外异步预取（`purpose: 'session-title'/'compaction'` 的旁路），且失败时回退启发式 |
 | U5 | 是否允许规则级 `model` 覆盖（"难题换更强模型"） | 与 D2 冲突，暂不做 |
 | U6 | 卸载插件后仍有会话选着 Auto | 预期是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（D10 的 `prepareCall` 不包策略）；没真机跑过 |
 

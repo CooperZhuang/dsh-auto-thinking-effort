@@ -67,12 +67,21 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 
 | 档位 id | 请求的 effort | 分数区间 | 含义 |
 |---|---|---|---|
-| `minimal` | `off` | ≤ −6 | 客套、纯机械操作 |
+| `minimal` | `off` | ≤ −6 | 客套、纯机械操作（**默认被下限抬到 `low`**，见下） |
 | `low` | `low` | −5 … −2 | 简单但要认真回答一句 |
 | `high` | `high` | −1 … 11 | **默认带**：普通提问、日常编码 |
-| `max` | `max` | ≥ 12 或用户明确要求 | 多信号叠加的硬任务 |
+| `max` | `max` | ≥ 12 或用户明确要求 | 多信号叠加的硬任务（**默认只有显式 pin 能到**） |
 
 分数 0（没有任何信号）落在 `high`——刻意如此：猜错方向时，"多想一点"比"少想一点"安全。
+
+### 下限与上限（默认收窄的两端）
+
+借鉴 oh-my-pi 的做法，`auto` 默认**不碰两端**：
+
+- **下限 `autoFloorLevel: low`**：`auto` 不会把思考关掉。客套/机械请求最多降到 `low`，不会到 `off`。想恢复"可以关思考"就设成 `minimal`。
+- **上限 `autoCeilingLevel: high`**：**分数算出来的**档位最高只到 `high`；只有**显式 pin**（`ultrathink` / `think hard` / `深入思考`）才允许到 `max`。pin 是用户明说的，不受天花板约束。
+
+两边都按"阶梯上的档位"表达，也可以用 `$weakest` / `$strongest` 令牌（自定义阶梯时特别有用）。
 
 ### 什么在加减分
 
@@ -80,10 +89,11 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 
 | 触发 | 档位 |
 |---|---|
-| `think hard` / `深入思考` / `仔细分析` / `thoroughly analyze` / `max thinking` | 最强档 |
+| `ultrathink` / `think hard` / `深入思考` / `仔细分析` / `thoroughly analyze` | 最强档 |
 | `quick` / `简单说` / `一句话` / `不用想` / `直接给` | 最弱档 |
 
-> pin 用的是 `$strongest` / `$weakest` 令牌，所以你把阶梯换成三档、五档，这两条规则照样有效。
+> - pin 用 `$strongest` / `$weakest` 令牌，所以你把阶梯换成三档、五档，这两条规则照样有效。
+> - pin **只在正文里匹配**：围栏代码块、行内代码、`<!-- 注释 -->`、XML/HTML 标签里的字一律不算（`// think hard` 不会触发）。加权规则不受此限制，粘贴的报错文本仍算证据。
 
 **加权信号（节选，完整列表见 `src/signals.ts`）**
 
@@ -100,17 +110,19 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | 跨文件/全仓：`codebase` / `整个项目` / `所有文件` | +2 |
 | 多条需求：`另外` / `同时` / `and also` | +2 |
 | 纯机械：`git status` / `列一下` / `跑一下测试` | −3 |
-| 客套：`谢谢` / `好的` / `thanks` | −4 |
+| 客套：`谢谢` / `好的` / `thanks` | −2 |
 
 **结构特征（代码算出来的，不用写正则）**
 
 | 特征 | 权重 |
 |---|---|
-| 正文 ≥ 2000 / 600 / 200 字符 | +4 / +2 / +1 |
+| 正文 ≥ 600 字符 | +1 |
 | 2 个以上代码块 / 1 个代码块 | +3 / +2 |
 | 3 个以上问号 / 2 个问号 | +2 / +1 |
 | 3 行以上列表项 | +1 |
 | ≤ 24 字符且无代码块 | −3 |
+
+> **长度和礼貌刻意只算很弱的证据**：难度不等于啰嗦，也不等于客气。这两条是从 oh-my-pi 的分类器 prompt（*"judge inherent task difficulty, not phrasing politeness or verbosity"*）学来的。
 
 **两条状态机规则**
 
@@ -133,6 +145,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
         autoEffortName: Auto
         autoEffortDescription: 每轮按提问自动选择档位
         autoWhenUnset: true
+        autoFloorLevel: low
+        autoCeilingLevel: high
         logDecisions: true
         inheritOnContinuation: true
         builtinRules: true
@@ -158,6 +172,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | `autoEffortName` | `Auto` | 选择器里显示的名字。 |
 | `autoEffortDescription` | 见上 | 选择器里的一句话说明。 |
 | `autoWhenUnset` | `true` | 请求上没有显式档位时是否也算自动。 |
+| `autoFloorLevel` | `low` | `auto` 允许的最低档位；设成阶梯最弱那档（如 `minimal`）就允许关掉思考。 |
+| `autoCeilingLevel` | `high` | **分数算出**的档位上限；pin 不受它约束。 |
 | `applyToSubagents` | `false` | 是否也管子代理会话（子代理通常由调用方指定路线，默认不动）。 |
 | `inheritOnContinuation` | `true` | 裸接续是否继承上一轮档位。 |
 | `logDecisions` | `true` | 每轮打一行 info 日志：档位、分数、理由。 |
@@ -168,9 +184,35 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 - `pattern`：正则源码，默认大小写不敏感（`flags: 'i'`）。**禁止 `g` / `y`**——它们会让 `lastIndex` 有状态，同一个函数对不同调用给出不同答案。
 - `level`：pin 到某个档位 id，或 `$strongest` / `$weakest`。
 - `weight`：加权分数，可为负。
+- `proseOnly`：是否只在**正文**里匹配（默认：pin 规则 `true`，加权规则 `false`）。
 - `note`：日志与决策记录里的理由。
 
-加载期就会 fail loud：正则编不过、`level` 指向不存在的档位、`maxScore` 不递增、`maxChars` 非法、`autoEffortId` 为空……都会直接抛错，而不是等到第一轮才悄悄失效。
+加载期就会 fail loud：正则编不过、`level` 指向不存在的档位、`maxScore` 不递增、`maxChars` 非法、`autoEffortId` 为空、`autoFloorLevel`/`autoCeilingLevel` 指向不存在的档位或下限高于上限……都会直接抛错，而不是等到第一轮才悄悄失效。
+
+---
+
+## 钳制方向：从下限一侧回答，不从请求一侧
+
+模型声明的档位和阶梯不重合时（换 provider、自定义阶梯），插件**先按下限筛出合法池，再取池里不超过请求的最高档**；请求低于整个池时就取池的最低档。
+
+这条方向是刻意选的：稀疏阶梯 `["off","max"]` 遇到 `low` 请求，**不能**用 `off` 回答——下限才是硬约束，请求只是偏好。这也是 oh-my-pi `clampAutoThinkingEffort` 的语义。
+
+---
+
+## 与 oh-my-pi（`omp`）的差异
+
+参考实现：[`auto-thinking/classifier.ts`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts)、[`thinking.ts`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/thinking.ts)。
+
+| 维度 | oh-my-pi | 本插件 |
+|---|---|---|
+| 分类方式 | **一次小模型调用**（`tiny`/`smol`，或本地 on-device <2B 模型），prompt 只让它回一个词 | 纯启发式，**零调用** |
+| `auto` 住在哪 | agent 层自己的 selector，**永远不是 Effort**，provider 映射前就解析掉 | 注入进模型档位列表的合成档位（DSH 没有贡献扩展点） |
+| 下限 | 不低于 `low` | 默认同样不低于 `low`（`autoFloorLevel`） |
+| 上限 | 默认 `xhigh`（差一档），只有 `ultrathink` 到 `max` | 默认 `high`，只有显式 pin 到 `max` |
+| 钳制 | 下限池内取不超过请求的最高档 | 已对齐（见上一节） |
+| 失败处理 | 抛错 → 回落到 provisional level，这一轮照常跑 | 无记录 → 默认带；请求路径永不抛 |
+
+**没有抄的**：小模型分类。它每轮多一次模型调用（他们用 tiny 模型和本地模型摊薄成本），而我们按 `docs/design.md` D1 把"零延迟、确定性、可复现"放在首位。想加的话，DSH 有现成旁路（`purpose: 'session-title' | 'compaction'` 的调用不经过 `agent/request`），见 D17/U4。
 
 ---
 
@@ -222,6 +264,9 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | **GUI：Auto → 每轮自动** | 选 Auto，发"谢谢" | 会话 `model/selection` 记 `reasoningEffort: "auto"`；请求头 `"off"` | `session-11eeae50` |
 | **GUI：手动档位不被覆盖** | 同一会话改选 `Low`，发"深入思考一下：…"（本会判 `max`） | 请求头仍是 `"low"` —— 同一会话内两轮档位不同 | `session-11eeae50` |
 | **GUI：Auto 不污染全局默认** | 选 Auto 后看 `settings.yaml` | `agent-default-model` 里**没有** `reasoningEffort`（存成"无显式档位"） | `~/.dsh/settings.yaml` |
+| 真机：下限生效 | `dsh --profile headless "git status"` | `reasoningEffort: "low"`（不再降到 `off`） | `session-4987185c` |
+| 真机：pin 越过天花板 | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-a82f0524` |
+| 真机：天花板挡住高分 | 无 pin 的重负载长文本（why+codebase+deadlock+analyze+prove+design+migration…） | `reasoningEffort: "high"`（分数够 `max` 但被天花板拦住） | `session-771ee9b3` |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 

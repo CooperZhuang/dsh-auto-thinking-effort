@@ -67,12 +67,21 @@ The shipped ladder matches DeepSeek's four efforts (`off` / `low` / `high` / `ma
 
 | Level | Requested effort | Score band | Meaning |
 |---|---|---|---|
-| `minimal` | `off` | ≤ −6 | pleasantries, mechanical operations |
+| `minimal` | `off` | ≤ −6 | pleasantries, mechanical operations (**lifted to `low` by the default floor**) |
 | `low` | `low` | −5 … −2 | simple, but worth a real sentence |
 | `high` | `high` | −1 … 11 | **default band**: ordinary questions, routine coding |
-| `max` | `max` | ≥ 12, or an explicit ask | many strong signals at once |
+| `max` | `max` | ≥ 12, or an explicit ask | many strong signals (**only reachable via a pin by default**) |
 
 A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, thinking more is safer than thinking less.
+
+### Floor and ceiling (both ends are narrowed by default)
+
+Borrowed from oh-my-pi: `auto` stays off both extremes.
+
+- **Floor `autoFloorLevel: low`** — `auto` never turns thinking off. Pleasantries and mechanical requests bottom out at `low`, not `off`. Set it to `minimal` to restore "auto may switch thinking off".
+- **Ceiling `autoCeilingLevel: high`** — a **score-derived** decision never exceeds `high`; only an **explicit pin** (`ultrathink` / `think hard` / `深入思考`) may reach `max`. A pin is the user speaking and is never capped.
+
+Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest` tokens (handy with a custom ladder).
 
 ### What scores
 
@@ -80,10 +89,11 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 
 | Trigger | Level |
 |---|---|
-| `think hard` / 深入思考 / 仔细分析 / `thoroughly analyze` / `max thinking` | strongest |
+| `ultrathink` / `think hard` / 深入思考 / 仔细分析 / `thoroughly analyze` | strongest |
 | `quick` / 简单说 / 一句话 / 不用想 / 直接给 | weakest |
 
-> Pins use the `$strongest` / `$weakest` tokens, so they keep working when you replace the ladder with three or five rungs.
+> - Pins use the `$strongest` / `$weakest` tokens, so they keep working when you replace the ladder with three or five rungs.
+> - Pins match **prose only**: text inside fenced blocks, inline code, `<!-- comments -->`, or XML/HTML tags never triggers them (`// think hard` does not). Weighted rules still see the raw text, so pasted error output remains evidence.
 
 **Weighted signals (excerpt; the full list is `src/signals.ts`)**
 
@@ -100,17 +110,19 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 | Whole-project scope: `codebase` / 整个项目 / 所有文件 | +2 |
 | Multiple requirements: 另外 / 同时 / `and also` | +2 |
 | Mechanical: `git status` / 列一下 / 跑一下测试 | −3 |
-| Pleasantries: 谢谢 / 好的 / `thanks` | −4 |
+| Pleasantries: 谢谢 / 好的 / `thanks` | −2 |
 
 **Structural features (computed, not regex)**
 
 | Feature | Weight |
 |---|---|
-| Body ≥ 2000 / 600 / 200 characters | +4 / +2 / +1 |
+| Body ≥ 600 characters | +1 |
 | ≥ 2 code fences / 1 code fence | +3 / +2 |
 | ≥ 3 question marks / 2 | +2 / +1 |
 | ≥ 3 list items | +1 |
 | ≤ 24 characters and no code block | −3 |
+
+> **Length and politeness are deliberately weak evidence**: difficulty is not verbosity and not politeness. Both follow oh-my-pi's classifier prompt (*"judge inherent task difficulty, not phrasing politeness or verbosity"*).
 
 **Two state-machine rules**
 
@@ -155,6 +167,8 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 | `autoEffortName` | `Auto` | Label shown in the picker. |
 | `autoEffortDescription` | see above | One-line explanation shown in the picker. |
 | `autoWhenUnset` | `true` | Treat a request with no explicit effort as auto too. |
+| `autoFloorLevel` | `low` | Weakest level `auto` may resolve to; set it to the ladder's weakest rung to allow switching thinking off. |
+| `autoCeilingLevel` | `high` | Highest **score-derived** level; pins bypass it. |
 | `applyToSubagents` | `false` | Also classify subagent children (their route is usually chosen by the caller). |
 | `inheritOnContinuation` | `true` | Bare continuations keep the previous level. |
 | `logDecisions` | `true` | One info line per turn: level, score, reasons. |
@@ -165,9 +179,35 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 - `pattern`: regex source, case-insensitive by default (`flags: 'i'`). **`g` / `y` are rejected** — a stateful `lastIndex` makes the classifier's answer depend on call order.
 - `level`: pin to a level id, or `$strongest` / `$weakest`.
 - `weight`: score contribution, may be negative.
+- `proseOnly`: match prose only (default: `true` for pins, `false` for weighted rules).
 - `note`: the reason recorded in logs and decisions.
 
-Everything fails loud at load time: an uncompilable regex, a pin to an unknown level, a non-increasing `maxScore`, an illegal `maxChars`, an empty `autoEffortId` — all throw immediately instead of silently doing nothing on the first turn.
+Everything fails loud at load time: an uncompilable regex, a pin to an unknown level, a non-increasing `maxScore`, an illegal `maxChars`, an empty `autoEffortId`, a floor/ceiling naming no configured level or ranking floor above ceiling — all throw immediately instead of silently doing nothing on the first turn.
+
+---
+
+## Clamp direction: answer from the floor side, not the request side
+
+When a route's declared rungs and the ladder do not overlap exactly (another provider, a custom ladder), the plugin **filters the legal pool by the floor first, then takes the highest pooled rung that does not exceed the request**; a request below the whole pool snaps up to the pool minimum.
+
+That direction is deliberate: on a sparse ladder `["off","max"]` a `low` request must **not** be answered with `off` — the floor is the hard constraint and the request is only a preference. This is oh-my-pi's `clampAutoThinkingEffort` semantics.
+
+---
+
+## Differences from oh-my-pi (`omp`)
+
+References: [`auto-thinking/classifier.ts`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts), [`thinking.ts`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/thinking.ts).
+
+| Dimension | oh-my-pi | This plugin |
+|---|---|---|
+| Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | pure heuristics, **zero calls** |
+| Where `auto` lives | an agent-local selector that is **never an Effort**, resolved before provider mapping | a synthetic gear injected into the model's rung list (DSH has no contribution hook) |
+| Floor | never below `low` | same by default (`autoFloorLevel`) |
+| Ceiling | default `xhigh` (one below top); only `ultrathink` reaches `max` | default `high`; only an explicit pin reaches `max` |
+| Clamping | highest pooled rung not exceeding the request | aligned (see above) |
+| Failure | throws → caller falls back to the provisional level and continues | no record → default band; never throws on the request path |
+
+**What we did not copy**: the small-model classifier. It costs an extra model call per turn (they amortize it with a tiny or local model); we keep zero latency, determinism, and reproducibility as the top priority (`docs/design.md` D1). If it is ever added, DSH has a bypass: `purpose: 'session-title' | 'compaction'` calls do not go through `agent/request` (D17/U4).
 
 ---
 
@@ -219,6 +259,9 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | **GUI: Auto → per turn** | select Auto, send "谢谢" | session `model/selection` records `reasoningEffort: "auto"`; request header `"off"` | `session-11eeae50` |
 | **GUI: manual gear not overridden** | same session, switch to `Low`, send "深入思考一下：…" (would classify as `max`) | header stays `"low"` — two different efforts in one live session | `session-11eeae50` |
 | **GUI: Auto does not pollute the default** | after selecting Auto, read `settings.yaml` | `agent-default-model` has **no** `reasoningEffort` | `~/.dsh/settings.yaml` |
+| Real run: floor applies | `dsh --profile headless "git status"` | `reasoningEffort: "low"` (no longer `off`) | `session-4987185c` |
+| Real run: pin crosses the ceiling | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-a82f0524` |
+| Real run: ceiling holds a heavy score back | long no-pin text (why+codebase+deadlock+analyze+prove+design+migration…) | `reasoningEffort: "high"` (score qualifies for `max`, ceiling blocks it) | `session-771ee9b3` |
 
 **Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 
@@ -226,6 +269,7 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 |---|---|
 | Gear injection / selection validation / persistence stripping | `tests/capability.spec.ts` (dispose restore, idempotence, no-LLM degradation) |
 | A gear always resolves to a real rung | `tests/wiring.spec.ts`: `reasoningEffort` is never `auto` |
+| Floor / ceiling / clamp direction / prose-only pins | `tests/levels.spec.ts`, `tests/classify.spec.ts`, `tests/wiring.spec.ts` |
 | Clamping / no capabilities / no shared rung | via a fake `llm` service |
 | Steering raises only, continuation inherits, no cross-turn leakage | see `tests/state.spec.ts`, `tests/wiring.spec.ts` |
 

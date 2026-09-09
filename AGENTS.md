@@ -9,12 +9,14 @@
 
 ## What this repository is
 
-A DSH (DeepSeek Harness) plugin package that chooses the **reasoning-effort
-level per turn** from the user's own message: a pure heuristic classifier
-(`src/classify.ts`) maps text to a score, the score selects a **level** on a
-configurable ladder (`src/levels.ts`), and the level's requested **effort** is
-clamped to the rungs the exact model route declares before being written onto
-the composed request.
+A DSH (DeepSeek Harness) plugin package that adds a synthetic **Auto** gear to
+every route's reasoning-effort list and, while that gear (or no explicit effort)
+is selected, chooses the **reasoning-effort level per turn** from the user's own
+message: a pure heuristic classifier (`src/classify.ts`) maps text to a score,
+the score selects a **level** on a configurable ladder (`src/levels.ts`), and the
+level's requested **effort** is clamped to the rungs the exact model route
+declares before being written onto the composed request. A concrete gear
+(`off`/`low`/`high`/`max`) is always returned verbatim.
 
 It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 `cordis.patch.yml`, the layer DSH merges when the package is installed through
@@ -22,14 +24,23 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 
 ## Hard constraints (do not "fix" these away)
 
+- **The Auto gear must never reach a provider.** It is not an adapter effort.
+  `agent/request` substitutes it before `prepareCall`, the sanitizer stays
+  registered even when `enabled: false`, and `prepareCall` is deliberately left
+  unpatched so a leaked gear fails loudly in-session instead of becoming a
+  malformed provider request. Any new call path that can carry an effort must be
+  checked against `src/capability.ts`.
 - **`prepend: true` on `agent/request` is load-bearing.** Cordis waterfall
   semantics: *"Listeners run outermost-first … returns the outermost listener's
   return value"* (`cordis/src/events.ts:225-243`). The Web entry point installs
   `installModelSelection` on every agent-scoped context, which re-applies the
   session's stored effort (`dsh-agent/lib/types/model-selection.js:33-47`).
-  Without `prepend`, that inner listener silently wins and the plugin looks
-  broken. `tests/wiring.spec.ts` registers the selection listener **first** on
-  purpose; the first test fails if this regresses.
+  Without `prepend`, that inner listener silently wins and the gear is never
+  resolved. `tests/wiring.spec.ts` registers the selection listener **first** on
+  purpose; the gear tests fail if this regresses.
+- **A concrete effort is returned verbatim.** That is the whole "manual wins"
+  contract; do not add a config that overrides a manual gear without a very good
+  reason.
 - **Only `reasoningEffort` may be rewritten.** The loop deep-freezes the request
   and logs a `request/header` change for any config difference
   (`dsh-agent-loop/lib/index.js:700-756`). Changing provider/model/prompt from
@@ -40,7 +51,7 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
   path. Determinism and zero latency are the whole point (see `docs/design.md`
   D1). A model-assisted classifier is an open question, not an invitation.
 - **Never throw on the request path.** Every failure path returns the composed
-  config unchanged; capability lookups warn once per route.
+  config unchanged — except a gear, which must be replaced or dropped.
 - **`g` / `y` regex flags are rejected** (`src/signals.ts`): a stateful
   `lastIndex` makes the classifier's answer depend on call order.
 - **The default band must stay the provider's normal effort**, not the cheapest.

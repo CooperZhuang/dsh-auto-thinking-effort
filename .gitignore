@@ -1,0 +1,28 @@
+# Build output — produced from src by `pnpm build`, never committed.
+lib/
+
+node_modules/
+
+# Package tarballs from `pnpm pack`.
+*.tgz
+
+# Test / tooling artifacts.
+coverage/
+playwright-report/
+test-results/
+.vitest/
+*.tsbuildinfo
+
+# Local verification artifacts (mounted test profile logs, session dumps).
+.verify/
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Local environment overrides.
+.env
+.env.local

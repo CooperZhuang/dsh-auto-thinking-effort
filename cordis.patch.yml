@@ -1,0 +1,56 @@
+# dsh-auto-thinking-effort bundle patch
+#
+# This file is the `dsh.bundle.patch` layer of the published npm package. When
+# the plugin is installed through the official CLI —
+#
+#   dsh plugin --profile <name> add dsh-auto-thinking-effort@<version>
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages and,
+# seeing this declaration, appends `dsh-auto-thinking-effort` to the bundle
+# stack. Profile boot then merges THIS patch exactly like a hand-written mount
+# line, so one command installs and mounts.
+#
+# ── What the row does ────────────────────────────────────────────────────────
+#
+# It mounts on the HOST plane and registers two listeners:
+#
+#   * `agent/pre-step`  — classify the turn's user message into a level.
+#   * `agent/request`   — rewrite `reasoningEffort` on the composed request.
+#
+# Host plane is the correct place for both. They are dispatch seams, not realm
+# services: `agent/pre-step` and `agent/request` are scope-filtered events, so a
+# root-plane listener observes every agent (and every subagent) without joining
+# any isolate. Nothing here needs `ctx.compaction`, `ctx.tools`, or any other
+# realm-scoped service; `ctx.llm` is read lazily and only for model capability.
+#
+# ── Precedence (read before debugging "it did not change my effort") ─────────
+#
+# The listener is registered with `prepend: true`, so it is the OUTERMOST
+# `agent/request` listener and its returned configuration is the one the loop
+# uses. That matters because the Web entry point installs
+# `installModelSelection` on each agent-scoped context, which re-applies the
+# session's stored effort (from `settings.yaml` → `agent-default-model.
+# reasoningEffort`, or from the GUI model picker) over the composed request. With
+# the plugin enabled, the classified level wins; set `respectExplicitEffort:
+# true` to hand control back to the stored selection.
+#
+# ── Scope of the change ─────────────────────────────────────────────────────
+#
+# Only `reasoningEffort` is touched. Provider, model, prompt, and message list
+# are never modified, so a decision can at worst cost a different amount of
+# thinking, never a different conversation. A route that declares no selectable
+# efforts is left completely alone.
+- insert:
+    - id: auto-thinking-effort
+      name: 'dsh-auto-thinking-effort'
+      config:
+        enabled: true
+        # Decide and log every turn, but never rewrite the request. Useful for
+        # a first look at a real session before trusting the classifier.
+        dryRun: false
+        # Subagents carry their own route and effort chosen by the caller;
+        # leave them alone unless you deliberately want them classified too.
+        applyToSubagents: false
+        # When true, a request that already carries an explicit effort (the
+        # session's model selection) is never overridden.
+        respectExplicitEffort: false

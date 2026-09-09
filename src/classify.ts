@@ -7,7 +7,13 @@
  * kind a reviewer can argue with. The tradeoff is honest: this reads *shape* and
  * *vocabulary*, not meaning. It can be wrong about a subtle question, which is
  * why the ladder's default band is the provider's normal effort rather than the
- * cheapest one.
+ * cheapest one, and why the ceiling keeps score-derived decisions off the top
+ * rung (`docs/design.md` D13).
+ *
+ * Two matching surfaces are deliberate, mirroring oh-my-pi's magic-keyword
+ * rules: **pin** rules see prose only (a keyword inside a fenced block, inline
+ * code, or an XML tag must not change behaviour), while **score** rules see the
+ * raw text so pasted stack traces and error names still count as evidence.
  *
  * @module dsh-auto-thinking-effort/classify
  */
@@ -43,6 +49,11 @@ export interface ClassifyOptions {
   inheritOnContinuation: boolean
   /** The previous turn's decision, when one exists in this session. */
   previous?: { level: string } | undefined
+  /**
+   * Highest level a score-derived decision may reach. Pins bypass it: an
+   * explicit request outranks a policy ceiling.
+   */
+  ceiling?: LevelSpec | undefined
 }
 
 /** Messages that only ask the agent to carry on. */
@@ -51,15 +62,31 @@ const CONTINUATION_PATTERN = /^(?:继续|接着|往下|下一步|go on|continue|
 /** A message at or below this length is treated as a throwaway unless it is code. */
 const SHORT_TEXT_CHARS = 24
 
-/** Length thresholds, in characters, and the score each contributes. */
-const LENGTH_BANDS: readonly { atLeast: number; weight: number; note: string }[] = Object.freeze([
-  { atLeast: 2_000, weight: 4, note: 'very long message' },
-  { atLeast: 600, weight: 2, note: 'long message' },
-  { atLeast: 200, weight: 1, note: 'substantial message' },
-])
+/**
+ * Length is weak evidence on purpose. oh-my-pi's classifier prompt states the
+ * principle outright: judge inherent difficulty, "not phrasing politeness or
+ * verbosity". A single +1 keeps a genuinely long brief from being read as easy
+ * without letting verbosity decide the turn.
+ */
+const LONG_TEXT_CHARS = 600
 
-/** Count fenced code blocks. */
+/** Count fenced code blocks in the raw text. */
 const FENCE_PATTERN = /^\s*(?:```|~~~)/gm
+
+/**
+ * Non-prose regions: fenced blocks, inline code spans, comments, and tags.
+ * Contents are replaced by a space so surrounding prose still matches.
+ */
+const NON_PROSE_PATTERN = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|<!--[\s\S]*?-->|<[^>\n]*>/g
+
+/**
+ * Remove regions that must not drive behaviour changes.
+ * @param text - the inspected message.
+ * @returns the prose with code spans, fenced blocks, comments, and tags blanked.
+ */
+export function stripNonProse(text: string): string {
+  return text.replace(NON_PROSE_PATTERN, ' ')
+}
 
 /**
  * Truncate long text for classification, keeping both ends.
@@ -85,16 +112,17 @@ export function truncateForClassification(text: string, maxChars: number): strin
 /**
  * Classify one user message.
  * @param text - the joined user text for the turn.
- * @param options - ladder, rules, and continuation policy.
+ * @param options - ladder, rules, ceiling, and continuation policy.
  * @returns the decision; `level` is always a configured level id.
  */
 export function classify(text: string, options: ClassifyOptions): Decision {
   const inspected = truncateForClassification(text.trim(), options.maxChars)
-  const continuation = CONTINUATION_PATTERN.test(inspected)
+  const prose = stripNonProse(inspected)
+  const continuation = CONTINUATION_PATTERN.test(prose)
 
   for (const rule of options.rules) {
     if (rule.level === undefined) continue
-    if (!rule.regex.test(inspected)) continue
+    if (!rule.regex.test(rule.proseOnly ? prose : inspected)) continue
     if (!options.levels.some((level) => level.id === rule.level)) continue
     return { level: rule.level, score: 0, reasons: [rule.note], pinned: true, continuation, signal: true }
   }
@@ -108,19 +136,14 @@ export function classify(text: string, options: ClassifyOptions): Decision {
 
   for (const rule of options.rules) {
     if (rule.level !== undefined || rule.weight === 0) continue
-    if (rule.regex.test(inspected)) add(rule.weight, rule.note)
+    if (rule.regex.test(rule.proseOnly ? prose : inspected)) add(rule.weight, rule.note)
   }
 
   const fences = inspected.match(FENCE_PATTERN)?.length ?? 0
   if (fences >= 2) add(3, 'multiple code blocks')
   else if (fences === 1) add(2, 'contains a code block')
 
-  for (const band of LENGTH_BANDS) {
-    if (inspected.length >= band.atLeast) {
-      add(band.weight, band.note)
-      break
-    }
-  }
+  if (inspected.length >= LONG_TEXT_CHARS) add(1, 'long message')
   if (inspected.length <= SHORT_TEXT_CHARS && fences === 0) add(-3, 'very short message')
 
   const questions = (inspected.match(/[?？]/g) ?? []).length
@@ -136,5 +159,23 @@ export function classify(text: string, options: ClassifyOptions): Decision {
     reasons.unshift(`bare continuation — kept level ${level.id}`)
   }
 
+  // A policy ceiling bounds heuristic decisions only. Pins returned above are
+  // the user speaking and are never capped.
+  const ceiling = options.ceiling
+  if (ceiling !== undefined && rank(options.levels, level.id) > rank(options.levels, ceiling.id)) {
+    level = ceiling
+    reasons.push(`capped at ${ceiling.id}`)
+  }
+
   return { level: level.id, score, reasons, pinned: false, continuation, signal: score !== 0 || continuation }
+}
+
+/**
+ * Rank one level on the ladder.
+ * @param levels - the validated ladder.
+ * @param id - a level id.
+ * @returns its index, or `-1` for an unknown id.
+ */
+function rank(levels: readonly LevelSpec[], id: string): number {
+  return levels.findIndex((level) => level.id === id)
 }

@@ -1,6 +1,6 @@
 {
   "id": "dsh-external/dsh-auto-thinking-effort",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "main": "./lib/index.js",
   "description": "自动档位（Auto）：每轮按提问选择推理 effort；手动档位（off/low/high/max）保持不变",
   "engines": {

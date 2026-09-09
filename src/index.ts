@@ -205,6 +205,7 @@ function observeTurn(
     maxChars: config.maxChars,
     inheritOnContinuation: config.inheritOnContinuation,
     previous: state.last,
+    ceiling: prepared.ceiling,
   })
   state.observe(turn, decision)
 }
@@ -249,7 +250,7 @@ async function decideEffort(context: RequestContext, resolved: LlmCallConfig): P
     if (!gearRequested) return resolved
     const fallbackLevel = levelForScore(prepared.levels, 0)
     const rungs = await supportedEfforts(context, resolved.provider, resolved.model)
-    const sanitized = rungs === undefined ? undefined : resolveEffort(prepared.levels, fallbackLevel, rungs)
+    const sanitized = rungs === undefined ? undefined : resolveEffort(prepared.levels, fallbackLevel, rungs, { floor: prepared.floor })
     return sanitized === undefined ? withoutEffort(resolved) : { ...resolved, reasoningEffort: ReasoningEffortId(sanitized.effort) }
   }
   const auto = gearRequested || (resolved.reasoningEffort === undefined && config.autoWhenUnset)
@@ -271,7 +272,7 @@ async function decideEffort(context: RequestContext, resolved: LlmCallConfig): P
     return gearRequested ? withoutEffort(resolved) : resolved
   }
 
-  const resolution = resolveEffort(prepared.levels, level, supported)
+  const resolution = resolveEffort(prepared.levels, level, supported, { floor: prepared.floor })
   if (resolution === undefined) {
     warnOnce(context, `ladder:${resolved.provider}/${resolved.model}`, 'warn',
       'turn %d: %s/%s supports [%s], which shares no rung with the configured ladder — %s',
@@ -290,7 +291,7 @@ async function decideEffort(context: RequestContext, resolved: LlmCallConfig): P
       resolution.effort,
       record === undefined ? 'default' : record.pinned ? 'pinned' : record.origin,
       changed ? `, was ${String(resolved.reasoningEffort)}` : ', unchanged',
-      resolution.clamped ? ', clamped to the nearest supported rung' : '',
+      resolution.clamped ? `, clamped to the allowed rungs (floor ${prepared.floor.id})` : '',
       record?.score ?? 0,
       record === undefined || record.reasons.length === 0 ? '' : ` — ${record.reasons.join('; ')}`,
     )

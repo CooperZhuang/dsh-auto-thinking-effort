@@ -47,6 +47,17 @@ export interface EffortResolution {
   clamped: boolean
 }
 
+/** Constraints applied while resolving an effort. */
+export interface ResolveEffortOptions {
+  /**
+   * Weakest rung auto may resolve to. Omit (or pass the ladder's weakest level)
+   * for no floor. Modelled on oh-my-pi's `clampAutoThinkingEffort`: the pool is
+   * the declared rungs at or above this rung, falling back to every declared
+   * rung only when the route tops out below it.
+   */
+  floor?: LevelSpec | undefined
+}
+
 /**
  * Validate a ladder.
  * @param levels - the configured levels, low to high.
@@ -105,15 +116,21 @@ export function effortLadder(levels: readonly LevelSpec[]): string[] {
 /**
  * Resolve a level's requested effort against a route's declared capabilities.
  *
- * The exact requested id wins when the adapter declares it. Otherwise the
- * nearest declared rung on the ladder is used (ties prefer the stronger rung),
- * so a provider with three levels still gets a sensible answer for a four-level
- * ladder. A route declaring none of the ladder's rungs yields `undefined`: the
- * caller must then leave the request alone rather than guess.
+ * The rung the adapter declares exactly wins when it is inside the allowed
+ * pool. Otherwise the **highest declared rung that does not exceed the
+ * request** is used, and a request below the whole pool snaps up to the pool's
+ * weakest rung. That direction is deliberate (and mirrors oh-my-pi's
+ * `clampAutoThinkingEffort`): a sparse ladder such as `["off","max"]` must not
+ * answer a `low` request with `off`, because the floor — not the request — is
+ * the hard constraint.
+ *
+ * A route declaring none of the ladder's rungs yields `undefined`: the caller
+ * must then leave the request alone rather than guess.
  *
  * @param levels - the validated ladder.
  * @param level - the level to resolve.
  * @param supported - effort ids the exact route declares, in any order.
+ * @param options - floor constraints; see {@link ResolveEffortOptions}.
  * @returns the effort to use, or `undefined` when the route supports none of
  * the ladder's rungs.
  */
@@ -121,19 +138,31 @@ export function resolveEffort(
   levels: readonly LevelSpec[],
   level: LevelSpec,
   supported: readonly string[],
+  options: ResolveEffortOptions = {},
 ): EffortResolution | undefined {
-  if (supported.includes(level.effort)) return { effort: level.effort, clamped: false }
   const ladder = effortLadder(levels)
-  const target = ladder.indexOf(level.effort)
-  if (target < 0) return undefined
-  let best: { effort: string; distance: number; position: number } | undefined
-  for (const effort of supported) {
-    const position = ladder.indexOf(effort)
-    if (position < 0) continue
-    const distance = Math.abs(position - target)
-    if (best === undefined || distance < best.distance || (distance === best.distance && position > best.position)) {
-      best = { effort, distance, position }
-    }
+  const requestPosition = ladder.indexOf(level.effort)
+  if (requestPosition < 0) return undefined
+
+  // Rank the declared rungs on the plugin's own ladder; an adapter effort the
+  // ladder cannot order is not selectable by this plugin.
+  const ranked = supported
+    .map((effort) => ({ effort, position: ladder.indexOf(effort) }))
+    .filter((candidate) => candidate.position >= 0)
+    .sort((left, right) => left.position - right.position)
+  if (ranked.length === 0) return undefined
+
+  const floorPosition = options.floor === undefined ? -1 : ladder.indexOf(options.floor.effort)
+  let pool = ranked
+  if (floorPosition >= 0) {
+    const atOrAboveFloor = ranked.filter((candidate) => candidate.position >= floorPosition)
+    if (atOrAboveFloor.length > 0) pool = atOrAboveFloor
   }
-  return best === undefined ? undefined : { effort: best.effort, clamped: true }
+
+  let chosen = pool[0] as { effort: string; position: number }
+  for (const candidate of pool) {
+    if (candidate.position > requestPosition) break
+    chosen = candidate
+  }
+  return { effort: chosen.effort, clamped: chosen.effort !== level.effort }
 }

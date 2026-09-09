@@ -41,6 +41,13 @@ export interface ConfigShape {
   autoEffortDescription: string
   /** Treat a request with no explicit effort as auto too. */
   autoWhenUnset: boolean
+  /**
+   * Weakest level auto may resolve to. Set it to the ladder's weakest level to
+   * let auto turn thinking off entirely.
+   */
+  autoFloorLevel: string
+  /** Highest level a score-derived auto decision may reach (pins bypass it). */
+  autoCeilingLevel: string
   /** Whether subagent child sessions are classified too. */
   applyToSubagents: boolean
   /** Keep the previous level when a message only asks to continue. */
@@ -72,6 +79,8 @@ export const Config: z<ConfigShape> = z.object({
   autoEffortName: z.string().default('Auto'),
   autoEffortDescription: z.string().default('Pick the effort per turn from your message'),
   autoWhenUnset: z.boolean().default(true),
+  autoFloorLevel: z.string().default('low'),
+  autoCeilingLevel: z.string().default('high'),
   applyToSubagents: z.boolean().default(false),
   inheritOnContinuation: z.boolean().default(true),
   logDecisions: z.boolean().default(true),
@@ -92,12 +101,16 @@ export function resolveConfig(raw: unknown = {}): ConfigShape {
   return Config(raw as ConfigShape)
 }
 
-/** Validated configuration plus the compiled rule list. */
+/** Validated configuration plus the compiled rule list and resolved bounds. */
 export interface PreparedConfig {
   /** The validated ladder. */
   levels: readonly LevelSpec[]
   /** Built-in and configured rules, compiled, in evaluation order. */
   rules: readonly CompiledRule[]
+  /** Weakest level auto may resolve to. */
+  floor: LevelSpec
+  /** Highest level a score-derived decision may reach. */
+  ceiling: LevelSpec
 }
 
 /**
@@ -123,6 +136,19 @@ export function prepareConfig(config: ConfigShape): PreparedConfig {
   const known = new Set(levels.map((level) => level.id))
   const strongest = (levels[levels.length - 1] as LevelSpec).id
   const weakest = (levels[0] as LevelSpec).id
+  const resolveBound = (value: string, field: string): LevelSpec => {
+    const id = value === STRONGEST_LEVEL ? strongest : value === WEAKEST_LEVEL ? weakest : value
+    const found = levels.find((level) => level.id === id)
+    if (found === undefined) {
+      throw new TypeError(`auto-thinking-effort: ${field} must name a configured level (or ${WEAKEST_LEVEL}/${STRONGEST_LEVEL}), got ${JSON.stringify(value)} (known: ${[...known].join(', ')})`)
+    }
+    return found
+  }
+  const floor = resolveBound(config.autoFloorLevel, 'autoFloorLevel')
+  const ceiling = resolveBound(config.autoCeilingLevel, 'autoCeilingLevel')
+  if (levels.indexOf(floor) > levels.indexOf(ceiling)) {
+    throw new RangeError(`auto-thinking-effort: autoFloorLevel (${floor.id}) must not rank above autoCeilingLevel (${ceiling.id})`)
+  }
   const specs: RuleSpec[] = (config.builtinRules ? [...BUILTIN_RULES, ...config.rules] : [...config.rules])
     .map((spec) => spec.level === STRONGEST_LEVEL
       ? { ...spec, level: strongest }
@@ -134,5 +160,5 @@ export function prepareConfig(config: ConfigShape): PreparedConfig {
       throw new TypeError(`auto-thinking-effort: rules[${String(index)}] pins unknown level ${JSON.stringify(spec.level)} (known: ${[...known].join(', ')}, or ${STRONGEST_LEVEL}/${WEAKEST_LEVEL})`)
     }
   }
-  return { levels, rules: compileRules(specs) }
+  return { levels, rules: compileRules(specs), floor, ceiling }
 }

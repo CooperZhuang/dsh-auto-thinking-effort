@@ -33,6 +33,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 
 | 项 | 值 |
 |---|---|
+| GitHub | https://github.com/CooperZhuang/dsh-auto-thinking-effort （public） |
 | 本地 | `C:\CodeRepository\dsh-auto-thinking-effort` |
 | 分支 / 提交 | `main` / 见 `git log` |
 | 包名 / 版本 | `dsh-auto-thinking-effort` / `0.0.1`（**未发布**） |

@@ -1,6 +1,6 @@
 # dsh-auto-thinking-effort
 
-> A DSH (DeepSeek Harness) plugin that **picks the model's reasoning-effort level per turn from the user's question**.
+> A DSH (DeepSeek Harness) plugin that adds an **Auto** gear to the model picker. Select it and the plugin picks the reasoning-effort level **every turn** from your message; select `off`/`low`/`high`/`max` and it stays completely out of the way.
 >
 > "thanks" → thinking off. "why does this deadlock? analyze and prove it" → top rung.
 >
@@ -10,11 +10,24 @@
 
 ## What it does (and does not)
 
-Before each turn the plugin reads the message **the human wrote**, scores it, maps the score onto a **level ladder**, and rewrites exactly one field when the request is composed: `reasoningEffort`.
+### The gear
+
+After installing, the effort menu becomes **Auto / Off / Low / High / Max** (`Auto` is the one this plugin adds; the other four are untouched):
+
+| Session selection | Behaviour |
+|---|---|
+| **Auto** (the synthetic gear) | the plugin decides the effort **every turn** |
+| no explicit effort (`autoWhenUnset`) | same — nothing selected means auto |
+| `Off` / `Low` / `High` / `Max` | **untouched** — a manual gear always wins |
+
+So "how do I specify it manually?" needs no extra mechanism: **pick a concrete gear**. The plugin only acts when the request carries Auto (or carries no effort at all).
+
+### Boundaries
 
 - **Only `reasoningEffort` changes.** Provider, model, system prompt, and message list are never touched. The worst case is a turn that thinks more or less than it needed — never a different conversation.
+- **The Auto id never reaches a provider.** It is a picker marker; `agent/request` turns it into a real rung before `prepareCall` runs. Even with `enabled: false` a fallback listener stays registered so a stored Auto cannot leak into a request.
 - **No classifier model call.** Classification is a pure function (regex + structural features): zero latency, zero cost, unit-testable, reproducible. The tradeoff is honest — it reads *shape and vocabulary*, not meaning — so the default band is the provider's normal effort rather than the cheapest one.
-- **Does it override a manual choice?** Yes, by default. See [Precedence](#precedence-it-overrides-the-gui-effort-picker).
+- **Auto never pollutes the global default**: the plugin intercepts `agent-default-model.saveSelection` and strips Auto, persisting "no explicit effort" instead. A profile without this plugin then reads the provider default instead of an id it cannot resolve.
 
 ---
 
@@ -22,13 +35,13 @@ Before each turn the plugin reads the message **the human wrote**, scores it, ma
 
 ```powershell
 # local checkout (not published to npm yet — use this form)
-dsh plugin --profile headless add C:\CodeRepository\dsh-auto-thinking-effort
+dsh plugin --profile web add C:\CodeRepository\dsh-auto-thinking-effort
 
 # once published, install by package name (the row is mounted by the bundle patch)
-dsh plugin --profile headless add dsh-auto-thinking-effort
+dsh plugin --profile web add dsh-auto-thinking-effort
 ```
 
-`dsh --profile headless --dump-config` should then show:
+`dsh --profile web --dump-config` should then show:
 
 ```yaml
 - id: auto-thinking-effort
@@ -37,8 +50,12 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
     enabled: true
     dryRun: false
     applyToSubagents: false
-    respectExplicitEffort: false
+    autoEffortId: auto
+    autoEffortName: Auto
+    autoEffortDescription: 每轮按提问自动选择档位
 ```
+
+> **Installing a bundle does not hot-reload**: `patchReload: live` watches only the profile's `cordis.patch.yml` (`dsh-app-boot/lib/index.js:1075-1095`), while install/uninstall edits `package.json`'s bundle list — so **restart `dsh web`** for it to take effect. A running session is not disturbed.
 
 To see what it **would** decide without changing the request, set `dryRun: true`; every turn logs its level, score, and reasons.
 
@@ -129,14 +146,17 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 
 | Field | Default | Purpose |
 |---|---|---|
-| `enabled` | `true` | Master switch; a disabled row registers nothing. |
+| `enabled` | `true` | Master switch. When off, no gear and no classification, but the fallback rewrite stays (a stored Auto still cannot leak). |
 | `dryRun` | `false` | Decide and log, never rewrite the request. |
 | `levels` | table above | Score → level → effort ladder; an empty list means the default. |
 | `builtinRules` | `true` | Use the shipped rules; disable to keep only your own. |
 | `rules` | `[]` | Extra rules; `level` pins, `weight` scores. |
-| `inheritOnContinuation` | `true` | Bare continuations keep the previous level. |
+| `autoEffortId` | `auto` | Id of the synthetic gear (appears in the selection and the picker). |
+| `autoEffortName` | `Auto` | Label shown in the picker. |
+| `autoEffortDescription` | see above | One-line explanation shown in the picker. |
+| `autoWhenUnset` | `true` | Treat a request with no explicit effort as auto too. |
 | `applyToSubagents` | `false` | Also classify subagent children (their route is usually chosen by the caller). |
-| `respectExplicitEffort` | `false` | Yield when the request already carries an explicit effort. |
+| `inheritOnContinuation` | `true` | Bare continuations keep the previous level. |
 | `logDecisions` | `true` | One info line per turn: level, score, reasons. |
 | `maxChars` | `8000` | Characters inspected per turn (long text keeps its head 60% + tail 40%). |
 
@@ -147,27 +167,40 @@ A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, th
 - `weight`: score contribution, may be negative.
 - `note`: the reason recorded in logs and decisions.
 
-Everything fails loud at load time: an uncompilable regex, a pin to an unknown level, a non-increasing `maxScore`, an illegal `maxChars` — all throw immediately instead of silently doing nothing on the first turn.
+Everything fails loud at load time: an uncompilable regex, a pin to an unknown level, a non-increasing `maxScore`, an illegal `maxChars`, an empty `autoEffortId` — all throw immediately instead of silently doing nothing on the first turn.
 
 ---
 
-## Precedence: it overrides the GUI effort picker
+## Why a manual gear is never overridden
 
-`agent/request` is a **waterfall**: the outermost listener's return value is the final request config. The Web entry point installs `installModelSelection` on every agent, which re-applies the session's stored effort (from `settings.yaml` → `agent-default-model.reasoningEffort`, or the GUI model picker).
+`agent/request` is a **waterfall**: the outermost listener's return value is the final request config. The Web entry point installs `installModelSelection` on every agent, which re-applies the session's stored effort.
 
-This plugin registers with `prepend: true`, so it is always outermost and its decision wins.
+This plugin registers with `prepend: true`, so it is always outermost — but it only acts in two cases: the request carries `autoEffortId`, or it carries no effort at all while `autoWhenUnset: true`. A request carrying `off`/`low`/`high`/`max` is returned verbatim, so a manual gear is never overridden.
 
-- To let the GUI / settings selection decide: set `respectExplicitEffort: true` (the request is then left completely alone whenever it already carries an effort).
-- To disable the plugin entirely: `enabled: false`, or `dryRun: true` to observe only.
+With `autoWhenUnset: false`, "nothing selected" means the provider default and the plugin stays out too.
+
+---
+
+## How the Auto gear is added
+
+The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, and a selection is validated through `resolveCallConfig`. DSH offers no extension point for contributing a level (`registerAdapter` throws `DUPLICATE_ADAPTER` for an already-registered provider), so the plugin wraps exactly three methods on the live services:
+
+| Wrapped method | Effect |
+|---|---|
+| `resolveModelInfo` | Inserts `Auto` in front of the adapter's own rungs and makes it the advertised default (so the picker shows Auto until the user chooses). |
+| `resolveCallConfig` | Passes the `Auto` id through (it is not an adapter effort, but selection-time validation must accept it). |
+| `agentDefaultModel.saveSelection` | Strips `Auto` before the deployment default is persisted, storing "no explicit effort" instead. |
+
+**`prepareCall` is deliberately not wrapped**: if a gear id ever reaches it (plugin uninstalled while a session still selects Auto), the adapter boundary rejects it with `UNSUPPORTED_REASONING_EFFORT` — a loud in-session error instead of a malformed provider request.
 
 ---
 
 ## Boundaries on the request path
 
-- **Unsupported rungs are clamped**: the plugin asks `ctx.llm.resolveModelInfo(provider, model)` for the exact model's declared efforts and takes the nearest rung on the ladder (ties prefer the stronger one).
-- **Unknown capabilities change nothing**: a model that declares no reasoning support, a missing `ctx.llm`, or a failed lookup returns the request unchanged and warns once.
+- **Unsupported rungs are clamped**: the plugin asks `ctx.llm.resolveModelInfo(provider, model)` for the exact model's declared efforts (minus Auto) and takes the nearest rung on the ladder (ties prefer the stronger one).
+- **Unknown capabilities change nothing**: a model that declares no reasoning support, a missing `ctx.llm`, or a failed lookup returns the request unchanged (a gear is dropped instead, falling back to the provider default) and warns once.
 - **One level per turn**: every step of a turn — including steps that only carry tool results — uses that turn's level; a new turn re-decides.
-- **Compaction and session-title calls are untouched**: they do not go through `agent/request`.
+- **Compaction and session-title calls are untouched**: they do not go through `agent/request` (they read the *logged* header, which already holds the substituted real effort).
 
 ---
 
@@ -182,21 +215,25 @@ This plugin registers with `prepend: true`, so it is always outermost and its de
 | **Control** (plugin off) | same prompt + `--patch` setting `enabled: false` | `reasoningEffort: "high"` (= settings default) | `session-5d10f7f5` |
 | Real turn (explicit deep thinking) | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-779daed0` |
 | Real turn (cause analysis, no pin) | `dsh --profile headless "Why does the upload helper return undefined after the migration?"` | `reasoningEffort: "high"` (why +5, migration +4 = 9, still inside the `high` band) | `session-30b39b2a` |
-| **Real GUI turn** | temporary `web-verify` profile (`dsh-base` + `dsh-web-app` + this plugin) on `127.0.0.1:5227`, message sent from a browser | `reasoningEffort: "off"` — even though settings default to `high` and that profile installs `installModelSelection` | `session-76a1f832` |
+| **GUI: the Auto gear appears** | a second `dsh --profile web --port 0` instance of the **real web profile** (dshmarket/dsh-memories included), opened in a browser | menu shows `Auto / Off / Low / High / Max`; the button reads "推理等级 Auto" | server `127.0.0.1:3745` |
+| **GUI: Auto → per turn** | select Auto, send "谢谢" | session `model/selection` records `reasoningEffort: "auto"`; request header `"off"` | `session-11eeae50` |
+| **GUI: manual gear not overridden** | same session, switch to `Low`, send "深入思考一下：…" (would classify as `max`) | header stays `"low"` — two different efforts in one live session | `session-11eeae50` |
+| **GUI: Auto does not pollute the default** | after selecting Auto, read `settings.yaml` | `agent-default-model` has **no** `reasoningEffort` | `~/.dsh/settings.yaml` |
 
-**Verified in-process only** (`tests/wiring.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
+**Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 
 | Scenario | Note |
 |---|---|
-| Overriding the stored effort | the first test fails if `prepend` ever regresses |
+| Gear injection / selection validation / persistence stripping | `tests/capability.spec.ts` (dispose restore, idempotence, no-LLM degradation) |
+| A gear always resolves to a real rung | `tests/wiring.spec.ts`: `reasoningEffort` is never `auto` |
 | Clamping / no capabilities / no shared rung | via a fake `llm` service |
 | Steering raises only, continuation inherits, no cross-turn leakage | see `tests/state.spec.ts`, `tests/wiring.spec.ts` |
 
 **Not verified on a real machine** (known gaps — do not treat as verified):
 
-- **Cross-turn switching inside one live session** (turn 1 `max` → turn 2 `off`, producing a `request/header` with reason `change`): the headless app answers one task and exits, so there is no multi-turn entry point; covered in-process only.
 - **A real subagent child** being skipped (`applyToSubagents: false`): in-process with a fake session header only.
 - **Non-DeepSeek providers** on the clamping path: fake `resolveModelInfo` only.
+- **Uninstalling the plugin while a session still selects Auto**: expected to fail loudly in-session with `UNSUPPORTED_REASONING_EFFORT` (`prepareCall` is deliberately unpatched), but never exercised for real.
 
 Reproduce a real result:
 
@@ -217,7 +254,7 @@ pnpm check     # typecheck → lint → build → test (the CI gate)
 ```
 
 - `lib/` is generated and gitignored.
-- Layout: `src/config.ts` (schema + fail-loud validation), `src/levels.ts` (bands + clamping), `src/signals.ts` (rule table + compiler), `src/classify.ts` (pure classifier), `src/state.ts` (per-agent turn state), `src/index.ts` (wiring).
+- Layout: `src/config.ts` (schema + fail-loud validation), `src/levels.ts` (bands + clamping), `src/signals.ts` (rule table + compiler), `src/classify.ts` (pure classifier), `src/state.ts` (per-agent turn state), `src/capability.ts` (Auto gear injection), `src/index.ts` (wiring).
 - Handoff notes: `docs/handoff.md`; design decisions: `docs/design.md`.
 
 ## License

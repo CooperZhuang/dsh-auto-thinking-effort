@@ -71,7 +71,7 @@
 - 反向证据（真的会输）：`tests/wiring.spec.ts` 第一个用例故意让 selection 监听器先注册；去掉 `prepend` 该用例失败。
 - 真机证据：`session-76a1f832`（web-verify profile，装了 session-controller，settings 默认 `high`，实际请求 `off`）。
 
-**逃生门**：`respectExplicitEffort: true` → 请求上已有显式 effort 就完全让位。
+**逃生门**：v0.2 起不再需要——手动档位本来就不被覆盖（D11）。
 
 ---
 
@@ -122,12 +122,59 @@
 
 ---
 
+## D10 — Auto 是"注入到能力列表里的合成档位"
+
+**决定**：插件把 `auto` 这个 id 注入到 `ctx.llm.resolveModelInfo(...).reasoning.efforts` 的最前面，并设为 advertised `defaultEffort`；同时让 `resolveCallConfig` 放行这个 id；落盘全局默认时再把它剥掉。
+
+**为什么不能用更"正规"的做法**：
+
+- 选择器的档位列表来自 `resolveModelInfo`（`dsh-api-session-controller/lib/types/catalog.js:14-26`），选中后由 `resolveCallConfig` 校验 effort 是否属于 adapter（`lib/types/commands.js:126-132`；校验逻辑在 `dsh-llm/lib/index.js:1561-1586`，未声明的 effort 直接抛 `UNSUPPORTED_REASONING_EFFORT`）。**没有"第三方贡献档位"的扩展点。**
+- 想包一层 adapter 也不行：`registerAdapter` 对已注册的 provider 直接抛 `DUPLICATE_ADAPTER`（`dsh-llm/lib/index.js:1272`），而且拿不到既有 adapter 实例。
+
+**为什么只包这三个方法**：
+
+| 方法 | 只影响 |
+|---|---|
+| `resolveModelInfo` | 选择器目录 + 本插件自己的能力查询（后者会把 auto 滤掉） |
+| `resolveCallConfig` | 选择阶段校验（只对 auto 短路） |
+| `agentDefaultModel.saveSelection` | 全局默认落盘（把 auto 变成"无显式档位"） |
+
+**`prepareCall` 故意不包**：它是真正会走到 adapter 的那条路。不包 → 万一 auto 漏过去，得到的是会话内 `UNSUPPORTED_REASONING_EFFORT` 报错（可见、可修），而不是一个 `reasoning_effort: "auto"` 的畸形 HTTP 请求。
+
+**已验证**：`tests/capability.spec.ts`（注入/放行/落盘剥离/dispose 恢复/幂等/无 llm 服务降级）；真机 GUI 选择器里确实出现 Auto 且能选中（`session-11eeae50`，服务 127.0.0.1:3745）。
+
+---
+
+## D11 — 具体档位永远原样返回（手动优先）
+
+**决定**：`agent/request` 只在两种情况下改写 effort：请求上带着 `autoEffortId`，或请求上没有 effort 且 `autoWhenUnset: true`。带着 `off`/`low`/`high`/`max` 的请求**原对象返回**。
+
+**理由**：用户明确选了档位就是最强的证据，不该被一个按关键词打分的启发式推翻。v0.1 默认"永远覆盖"，用户直接指出这不对。
+
+**证据**：`src/index.ts` 的 `decideEffort`（`auto` 判定）；`tests/wiring.spec.ts` 的 `manual gears` 三个用例；真机同一会话里先 Auto（"谢谢"→`off`）再手动 Low（"深入思考一下…"→`low`），见 `session-11eeae50`。
+
+---
+
+## D12 — Auto 不落进全局默认
+
+**决定**：包一层 `agentDefaultModel.saveSelection`，把 `auto` 从落盘的选择里剥掉（存成"无显式档位"）。
+
+**理由**：在 GUI 里选一次 Auto 会把选择存进 `settings.yaml` 的 `agent-default-model`，而**所有 profile 都读这个文件**。一个没装本插件的 profile 拿到 `auto` 后，会在 `prepareCall` 被 `UNSUPPORTED_REASONING_EFFORT` 拒掉——每一轮都失败，而且原因极难猜。
+
+剥掉之后：装了插件的 profile 读到"无显式档位"→ 因为 `autoWhenUnset: true` 仍是自动；没装的 profile 读到"无显式档位"→ provider 默认。两边都对。
+
+**证据**：`tests/capability.spec.ts` 的落盘守卫用例；真机选 Auto 后 `settings.yaml` 的 `agent-default-model` 里确实没有 `reasoningEffort`。
+
+---
+
 ## 未定 / 开放问题
 
 | 编号 | 问题 | 现状 |
 |---|---|---|
-| U1 | 同一会话内跨轮切换的真机验证（turn1 `max` → turn2 `off`，`request/header` reason=change） | headless 是一次性任务，没有多轮入口；只在进程内测过。可选路径：临时 `web-verify` profile + 浏览器连续发两条消息（注意 `playwright-cli` 的浏览器是跨会话共享的，见 `docs/handoff.md` 陷阱 6） |
-| U2 | 真实子代理会话的跳过行为 | 只在进程内用假 header 测过 |
+| U2 | 真实子代理会话的跳过行为 | 只在进程内用假 header 测过（`applyToSubagents: false`） |
 | U3 | 非 DeepSeek provider 的钳制路径 | 只用假 `resolveModelInfo` 测过 |
 | U4 | 是否要一条可选的模型分类兜底（D1） | 不做；若要做，必须在 `agent/pre-step` 之外异步预取，且失败时回退启发式 |
 | U5 | 是否允许规则级 `model` 覆盖（"难题换更强模型"） | 与 D2 冲突，暂不做 |
+| U6 | 卸载插件后仍有会话选着 Auto | 预期是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（D10 的 `prepareCall` 不包策略）；没真机跑过 |
+
+> **U1（同会话跨轮切换的真机验证）已关闭**：真机 GUI 会话 `session-11eeae50` 里，turn 1（Auto）写 `off`、turn 2（手动 Low）写 `low`，同一会话两条不同的 `request/header`。

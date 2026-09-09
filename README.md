@@ -1,6 +1,6 @@
 # dsh-auto-thinking-effort
 
-> DSH（DeepSeek Harness）插件：**根据用户这一轮的提问，自动选择模型的思考档位（reasoning effort）**。
+> DSH（DeepSeek Harness）插件：在模型选择器里加一个 **Auto（自动）档位**。选中它，插件就**每一轮**根据你的提问自己切 effort；选 `off`/`low`/`high`/`max` 则完全是手动，插件一点都不插手。
 >
 > 问"谢谢"→ 关掉思考；问"为什么这里会死锁，分析并证明"→ 拉到最高档。
 >
@@ -10,11 +10,24 @@
 
 ## 它做什么（以及不做什么）
 
-每一轮（turn）开始前，插件读一遍**用户自己写的消息**，算一个分数，把分数映射到**档位阶梯**，再在请求组装的那一刻只改写一个字段：`reasoningEffort`。
+### 档位
+
+装好后模型选择器的推理等级菜单变成 **Auto / Off / Low / High / Max**（`Auto` 是本插件加的那一个，其余四个原样保留）：
+
+| 会话里的选择 | 行为 |
+|---|---|
+| **Auto**（插件加的合成档位） | 插件**每轮**读你的消息决定 effort |
+| 没有显式档位（`autoWhenUnset`） | 同上——没选 = 自动 |
+| `Off` / `Low` / `High` / `Max` | **完全不动**，手动档位永远优先 |
+
+所以"想手动指定"不需要额外操作：**选一个具体档位就行**。插件只在请求上带着 Auto（或压根没带 effort）时才出手。
+
+### 边界
 
 - **只改 `reasoningEffort`**。provider、model、system prompt、消息列表一律不动。最坏情况是"这轮想得多了/少了"，永远不会变成"另一段对话"。
+- **Auto 这个 id 绝不会发给模型**。它只是选择器里的一个标记；`agent/request` 在 `prepareCall` 之前就把它换成模型真正支持的档位。哪怕插件被 `enabled: false` 关掉，也留着一条"兜底改写"监听器，保证它不会漏到 provider 请求里。
 - **不调模型做分类**。分类是纯函数（正则 + 结构特征），零延迟、零成本、可单测、可复现。代价是它读的是**形状和用词**，不是语义——所以默认档位是 provider 的常规档，而不是最便宜的档。
-- **不改用户的手动选择？** 默认会改。见下面 [优先级](#优先级会覆盖-gui-里的档位选择)。
+- **Auto 不会污染全局默认**：插件拦掉 `agent-default-model.saveSelection` 里的 Auto，落盘的是"没有显式档位"。这样别的没装插件的 profile 读到的是 provider 默认，不会因为一个它们不认识的 id 而报错。
 
 ---
 
@@ -22,13 +35,13 @@
 
 ```powershell
 # 本地 checkout（当前状态：尚未发布到 npm，用这一种）
-dsh plugin --profile headless add C:\CodeRepository\dsh-auto-thinking-effort
+dsh plugin --profile web add C:\CodeRepository\dsh-auto-thinking-effort
 
 # 发布后可以直接按包名装（插件行会随 bundle patch 自动挂载）
-dsh plugin --profile headless add dsh-auto-thinking-effort
+dsh plugin --profile web add dsh-auto-thinking-effort
 ```
 
-装完 `dsh --profile headless --dump-config` 里应能看到：
+装完 `dsh --profile web --dump-config` 里应能看到：
 
 ```yaml
 - id: auto-thinking-effort
@@ -37,8 +50,12 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
     enabled: true
     dryRun: false
     applyToSubagents: false
-    respectExplicitEffort: false
+    autoEffortId: auto
+    autoEffortName: Auto
+    autoEffortDescription: 每轮按提问自动选择档位
 ```
+
+> **改 bundle 不会热加载**：`patchReload: live` 只监听 profile 的 `cordis.patch.yml`（`dsh-app-boot/lib/index.js:1075-1095`），装/卸插件改的是 `package.json` 的 bundles 列表，所以**要重启 `dsh web` 才生效**，不会打断正在跑的会话。
 
 想先看它**打算**怎么判、但先不改请求：把 `dryRun: true` 打开，日志里会打出每轮的档位与理由。
 
@@ -112,7 +129,10 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
         enabled: true
         dryRun: false
         applyToSubagents: false
-        respectExplicitEffort: false
+        autoEffortId: auto
+        autoEffortName: Auto
+        autoEffortDescription: 每轮按提问自动选择档位
+        autoWhenUnset: true
         logDecisions: true
         inheritOnContinuation: true
         builtinRules: true
@@ -129,14 +149,17 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
-| `enabled` | `true` | 总开关。关闭时不注册任何监听器。 |
+| `enabled` | `true` | 总开关。关闭时不再加 Auto 档位、不再分类，但保留兜底改写（防止已存的 Auto 漏到 provider）。 |
 | `dryRun` | `false` | 只判定 + 打日志，**不**改写请求。 |
 | `levels` | 见上表 | 分数→档位→effort 的阶梯；空列表 = 用默认阶梯。 |
 | `builtinRules` | `true` | 是否启用内置规则（关掉只用自己的 `rules`）。 |
 | `rules` | `[]` | 追加规则；`level` 是 pin，`weight` 是加减分。 |
-| `inheritOnContinuation` | `true` | 裸接续是否继承上一轮档位。 |
+| `autoEffortId` | `auto` | 合成档位的 id（会出现在会话选择与选择器里）。 |
+| `autoEffortName` | `Auto` | 选择器里显示的名字。 |
+| `autoEffortDescription` | 见上 | 选择器里的一句话说明。 |
+| `autoWhenUnset` | `true` | 请求上没有显式档位时是否也算自动。 |
 | `applyToSubagents` | `false` | 是否也管子代理会话（子代理通常由调用方指定路线，默认不动）。 |
-| `respectExplicitEffort` | `false` | 请求上已有显式 effort 时是否让位（见下）。 |
+| `inheritOnContinuation` | `true` | 裸接续是否继承上一轮档位。 |
 | `logDecisions` | `true` | 每轮打一行 info 日志：档位、分数、理由。 |
 | `maxChars` | `8000` | 分类时最多看多少字符（超长会保留头 60% + 尾 40%）。 |
 
@@ -147,27 +170,40 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
 - `weight`：加权分数，可为负。
 - `note`：日志与决策记录里的理由。
 
-加载期就会 fail loud：正则编不过、`level` 指向不存在的档位、`maxScore` 不递增、`maxChars` 非法……都会直接抛错，而不是等到第一轮才悄悄失效。
+加载期就会 fail loud：正则编不过、`level` 指向不存在的档位、`maxScore` 不递增、`maxChars` 非法、`autoEffortId` 为空……都会直接抛错，而不是等到第一轮才悄悄失效。
 
 ---
 
-## 优先级：会覆盖 GUI 里的档位选择
+## 为什么手动档位不会被覆盖
 
-`agent/request` 是一条 **waterfall**：最外层监听器的返回值就是最终请求配置。Web 入口会给每个 agent 装 `installModelSelection`，它会把会话里存的 effort（来自 `settings.yaml` 的 `agent-default-model.reasoningEffort`，或 GUI 模型选择器）重新盖到请求上。
+`agent/request` 是一条 **waterfall**：最外层监听器的返回值就是最终请求配置。Web 入口会给每个 agent 装 `installModelSelection`，它把会话里存的 effort 重新盖到请求上。
 
-本插件用 `prepend: true` 注册，因此**永远是外层**，判定结果会覆盖那个存储值。
+本插件用 `prepend: true` 注册，因此**永远是最外层**——但它的判定只作用于两种情况：请求上带着 `autoEffortId`，或请求上没有任何 effort 且 `autoWhenUnset: true`。**请求上带着 `off`/`low`/`high`/`max` 时直接原样返回**，所以手动档位不会被覆盖。
 
-- 想让 GUI / settings 的档位说了算：设 `respectExplicitEffort: true`（此时请求上已有显式 effort 就完全不动）。
-- 想临时整体关掉：`enabled: false` 或 `dryRun: true`。
+`autoWhenUnset: false` 时，"没选档位"= 交给 provider 默认，插件也不出手。
+
+---
+
+## Auto 档位是怎么加进去的
+
+选择器的列表来自 `ctx.llm.resolveModelInfo(...).reasoning.efforts`，而选中后 `selectModel` 会用 `resolveCallConfig` 校验这个 effort 是不是 adapter 声明过的。DSH 没有给"第三方增加档位"留扩展点（`registerAdapter` 对已注册的 provider 直接抛 `DUPLICATE_ADAPTER`），所以插件只包了 `llm` 服务实例上的三个方法：
+
+| 包住的方法 | 作用 |
+|---|---|
+| `resolveModelInfo` | 在 adapter 自己声明的档位前面插入 `Auto`，并把它设为 advertised default（这样没显式选档位时选择器显示 Auto）。 |
+| `resolveCallConfig` | 只对 `Auto` 这个 id 直接放行（它不是 adapter 的档位，选择阶段的校验要能过）。 |
+| `agentDefaultModel.saveSelection` | 落盘全局默认时把 `Auto` 去掉，存成"没有显式档位"。 |
+
+**`prepareCall` 故意不包**：万一 Auto 漏到了那一步（比如插件被卸载而某个会话还选着 Auto），adapter 边界会直接报 `UNSUPPORTED_REASONING_EFFORT`——一个会话内的显式报错，而不是一个发给 provider 的畸形请求。
 
 ---
 
 ## 请求路径上的边界
 
-- **不支持的档位会被钳制**：插件先查 `ctx.llm.resolveModelInfo(provider, model)` 拿到该**精确模型**声明的 effort 列表，再在阶梯上取最近的一档（同距时偏向更强的一档）。DeepSeek 声明四档时通常不需要钳制；换 provider 也能用。
-- **查不到能力就不动**：模型没声明 reasoning 能力、没有挂 `ctx.llm`、或查询失败时，请求原样返回，并只警告一次。
+- **不支持的档位会被钳制**：插件先查 `ctx.llm.resolveModelInfo(provider, model)` 拿到该**精确模型**声明的 effort 列表（并滤掉 Auto），再在阶梯上取最近的一档（同距时偏向更强的一档）。DeepSeek 声明四档时通常不需要钳制；换 provider 也能用。
+- **查不到能力就不动**：模型没声明 reasoning 能力、没有挂 `ctx.llm`、或查询失败时，请求原样返回（若是 Auto，则把 effort 去掉回落到 provider 默认），并只警告一次。
 - **同一轮内档位一致**：同一 turn 的所有 step（包括只带 tool result 的 step）都用这一轮的档位；换轮才重新判定。
-- **不碰 compaction / 会话标题**：那些请求不走 `agent/request`，不受影响。
+- **不碰 compaction / 会话标题**：那些请求不走 `agent/request`，不受影响（它们读的是**已落盘**的请求头，里面已经是替换后的真实档位）。
 
 ---
 
@@ -182,21 +218,25 @@ dsh plugin --profile headless add dsh-auto-thinking-effort
 | **对照组**（插件关掉） | 同一句话 + `--patch` 覆盖 `enabled: false` | `reasoningEffort: "high"`（= settings 默认） | `session-5d10f7f5` |
 | 真机一轮（明确要深想） | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-779daed0` |
 | 真机一轮（因果分析，未 pin） | `dsh --profile headless "Why does the upload helper return undefined after the migration?"` | `reasoningEffort: "high"`（why +5、migration +4 = 9，仍在 `high` 带内） | `session-30b39b2a` |
-| **GUI 真机一轮** | 临时 `web-verify` profile（`dsh-base` + `dsh-web-app` + 本插件）在 `127.0.0.1:5227`，浏览器里发"谢谢" | `reasoningEffort: "off"` —— 尽管 settings 里默认是 `high`，且该 profile 装有 `installModelSelection` | `session-76a1f832` |
+| **GUI：Auto 档位出现在选择器里** | 用**真实 web profile**（含 dshmarket/dsh-memories 等）另起一个 `dsh --profile web --port 0` 实例，浏览器打开 | 菜单变成 `Auto / Off / Low / High / Max`，选中后按钮显示"推理等级 Auto" | 服务 `127.0.0.1:3745` |
+| **GUI：Auto → 每轮自动** | 选 Auto，发"谢谢" | 会话 `model/selection` 记 `reasoningEffort: "auto"`；请求头 `"off"` | `session-11eeae50` |
+| **GUI：手动档位不被覆盖** | 同一会话改选 `Low`，发"深入思考一下：…"（本会判 `max`） | 请求头仍是 `"low"` —— 同一会话内两轮档位不同 | `session-11eeae50` |
+| **GUI：Auto 不污染全局默认** | 选 Auto 后看 `settings.yaml` | `agent-default-model` 里**没有** `reasoningEffort`（存成"无显式档位"） | `~/.dsh/settings.yaml` |
 
-**只在进程内验证**（`tests/wiring.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
+**只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 
 | 场景 | 说明 |
 |---|---|
-| 覆盖存储档位 | 第一个用例：没有 `prepend` 就会挂 |
+| Auto 档位注入 / 选择校验 / 落盘剥离 | `tests/capability.spec.ts`（含 dispose 恢复、幂等、无 llm 服务时降级） |
+| Auto 在没有分类结果时也要落成真实档位 | `tests/wiring.spec.ts`：`reasoningEffort` 永远不是 `auto` |
 | 钳制 / 查不到能力 / 无共享档位 | 用假 `llm` 服务覆盖 |
 | 轮内 steering 只升不降、裸接续继承、跨轮不串档 | 见 `tests/state.spec.ts`、`tests/wiring.spec.ts` |
 
 **没有真机验证的**（已知缺口，不要当成已验证）：
 
-- **同一会话内的跨轮切换**（turn 1 `max` → turn 2 `off` 触发 `request/header` reason=change）：headless 是一次性任务，没有多轮入口；只在进程内测过。
 - **真实子代理会话**的跳过行为（`applyToSubagents: false`）：只在进程内用假 session header 测过。
 - **非 DeepSeek provider** 的钳制路径：只用假 `resolveModelInfo` 测过。
+- **插件卸载后仍有会话选着 Auto**：预期表现是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（`prepareCall` 故意不包），但没有真机跑过。
 
 复现真机结果：
 
@@ -219,7 +259,7 @@ pnpm check     # typecheck → lint → build → test（= CI 门禁）
 ```
 
 - `lib/` 是构建产物，**不入库**。
-- 仓库结构：`src/config.ts`（schema + fail-loud 校验）、`src/levels.ts`（分数带 + 钳制）、`src/signals.ts`（规则表 + 编译）、`src/classify.ts`（纯分类器）、`src/state.ts`（每 agent 的轮状态）、`src/index.ts`（接线）。
+- 仓库结构：`src/config.ts`（schema + fail-loud 校验）、`src/levels.ts`（分数带 + 钳制）、`src/signals.ts`（规则表 + 编译）、`src/classify.ts`（纯分类器）、`src/state.ts`（每 agent 的轮状态）、`src/capability.ts`（Auto 档位注入）、`src/index.ts`（接线）。
 - 交接/背景见 `docs/handoff.md`，设计取舍见 `docs/design.md`。
 
 ## License

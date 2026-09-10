@@ -22,11 +22,36 @@
 
 所以"想手动指定"不需要额外操作：**选一个具体档位就行**。插件只在请求上带着 Auto（或压根没带 effort）时才出手。
 
-### 边界
+### 两个分类后端
 
+| `classifier` | 怎么决定 | 延迟/成本 |
+|---|---|---|
+| `heuristic`（默认） | 纯函数：正则规则加权 + 结构特征 | 0 |
+| `model` | **一次小模型调用**：把允许的档位和它们的说明写进系统提示，让模型只回一个词 | 每轮 +1 次小请求（可设硬超时） |
+
+模型后端的硬规则：
+
+- **只在没有 pin 的轮次调用**。用户写了 `ultrathink` / `think hard` / `深入思考` 这类显式要求，就不花这次调用——pin 永远优先。
+- **只把允许的档位写进提示**。候选 = 阶梯上 `autoFloorLevel`..`autoCeilingLevel` 之间的档位，所以策略上限不会被模型绕过；候选不足 2 个时直接跳过调用。
+- **`agent/pre-step` 发起、`agent/request` 等待**，这段延迟与提示组装重叠；另有 `classifierTimeoutMs` 硬超时。
+- **任何失败都回落到启发式判定**：模型不存在、stream 报错、超时、回答解析不出来——这一轮照常跑，档位用启发式算出来的那个。
+- 回答按文本缓存（同一句话、同一路线、同一候选集不重复调用，最多记 64 条）。
+- 档位的 `description` 会写进提示，所以自定义阶梯也能向模型解释自己；没写就退回用 id。
+
+```yaml
+- id: auto-thinking-effort
+  config:
+    classifier: model
+    # 建议指一个小而快的模型；留空则用该会话自己的路线
+    classifierModel: deepseek-official/deepseek-v4-flash
+    classifierTimeoutMs: 8000
+    classifierMaxTokens: 64
+```
+
+### 边界
 - **只改 `reasoningEffort`**。provider、model、system prompt、消息列表一律不动。最坏情况是"这轮想得多了/少了"，永远不会变成"另一段对话"。
 - **Auto 这个 id 绝不会发给模型**。它只是选择器里的一个标记；`agent/request` 在 `prepareCall` 之前就把它换成模型真正支持的档位。哪怕插件被 `enabled: false` 关掉，也留着一条"兜底改写"监听器，保证它不会漏到 provider 请求里。
-- **不调模型做分类**。分类是纯函数（正则 + 结构特征），零延迟、零成本、可单测、可复现。代价是它读的是**形状和用词**，不是语义——所以默认档位是 provider 的常规档，而不是最便宜的档。
+- **分类有两个后端，默认不调模型**。默认是纯函数（正则 + 结构特征）：零延迟、零成本、可单测、可复现；代价是它读的是**形状和用词**，不是语义。想让模型来判断，把 `classifier` 设成 `model`（下一节）。
 - **Auto 不会污染全局默认**：插件拦掉 `agent-default-model.saveSelection` 里的 Auto，落盘的是"没有显式档位"。这样别的没装插件的 profile 读到的是 provider 默认，不会因为一个它们不认识的 id 而报错。
 
 ---
@@ -174,6 +199,10 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | `autoWhenUnset` | `true` | 请求上没有显式档位时是否也算自动。 |
 | `autoFloorLevel` | `low` | `auto` 允许的最低档位；设成阶梯最弱那档（如 `minimal`）就允许关掉思考。 |
 | `autoCeilingLevel` | `high` | **分数算出**的档位上限；pin 不受它约束。 |
+| `classifier` | `heuristic` | 分类后端：`heuristic`（默认，纯函数）或 `model`（一次小模型调用）。 |
+| `classifierModel` | `''` | 模型后端用的路线 `provider/model`；留空 = 用该会话自己的路线。 |
+| `classifierTimeoutMs` | `8000` | 单次分类调用的硬超时（毫秒）。 |
+| `classifierMaxTokens` | `64` | 分类调用的输出上限（它只回一个词）。 |
 | `applyToSubagents` | `false` | 是否也管子代理会话（子代理通常由调用方指定路线，默认不动）。 |
 | `inheritOnContinuation` | `true` | 裸接续是否继承上一轮档位。 |
 | `logDecisions` | `true` | 每轮打一行 info 日志：档位、分数、理由。 |
@@ -205,14 +234,14 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 
 | 维度 | oh-my-pi | 本插件 |
 |---|---|---|
-| 分类方式 | **一次小模型调用**（`tiny`/`smol`，或本地 on-device <2B 模型），prompt 只让它回一个词 | 纯启发式，**零调用** |
+| 分类方式 | **一次小模型调用**（`tiny`/`smol`，或本地 on-device <2B 模型），prompt 只让它回一个词 | **可配**：默认纯启发式（零调用），设 `classifier: model` 后同样走一次小模型调用 |
 | `auto` 住在哪 | agent 层自己的 selector，**永远不是 Effort**，provider 映射前就解析掉 | 注入进模型档位列表的合成档位（DSH 没有贡献扩展点） |
 | 下限 | 不低于 `low` | 默认同样不低于 `low`（`autoFloorLevel`） |
 | 上限 | 默认 `xhigh`（差一档），只有 `ultrathink` 到 `max` | 默认 `high`，只有显式 pin 到 `max` |
 | 钳制 | 下限池内取不超过请求的最高档 | 已对齐（见上一节） |
 | 失败处理 | 抛错 → 回落到 provisional level，这一轮照常跑 | 无记录 → 默认带；请求路径永不抛 |
 
-**没有抄的**：小模型分类。它每轮多一次模型调用（他们用 tiny 模型和本地模型摊薄成本），而我们按 `docs/design.md` D1 把"零延迟、确定性、可复现"放在首位。想加的话，DSH 有现成旁路（`purpose: 'session-title' | 'compaction'` 的调用不经过 `agent/request`），见 D17/U4。
+**两边都有的**：模型分类后端。他们只有这一条路，我们把它做成可选项且默认关着——按 `docs/design.md` D1 把「零延迟、确定性、可复现」放在首位；打开后按 D17 的契约走：只在没有 pin 的轮次调用、`agent/pre-step` 发起并在 `agent/request` 等待、超时与失败一律回落到启发式。
 
 ---
 
@@ -267,6 +296,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | 真机：下限生效 | `dsh --profile headless "git status"` | `reasoningEffort: "low"`（不再降到 `off`） | `session-4987185c` |
 | 真机：pin 越过天花板 | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-a82f0524` |
 | 真机：天花板挡住高分 | 无 pin 的重负载长文本（why+codebase+deadlock+analyze+prove+design+migration…） | `reasoningEffort: "high"`（分数够 `max` 但被天花板拦住） | `session-771ee9b3` |
+| 真机：模型后端生效 | 同一句话（把 README 第一段原样念一遍）分别用 `classifier: heuristic` 与 `classifier: model`（`deepseek-v4-flash`）跑 | 启发式 `high` → 模型 `low`：模型判断它 trivial 并覆盖了启发式 | `session-81e78e99` / `session-7de3b60c` |
+| 真机：分类器失败不影响这一轮 | `classifierModel` 指向一个不存在的模型 | 请求照常发出，档位回落到启发式的 `high` | `session-718b1f73` |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 

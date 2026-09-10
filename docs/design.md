@@ -211,15 +211,28 @@
 
 ---
 
-## D17 — 分类器继续用启发式（明确不抄 oh-my-pi 的部分）
+## D17 — 模型分类是**可选后端**，默认关
 
-**决定**：不引入模型分类。只借鉴它的**边界策略**（D13–D16）。
+**决定**：`classifier` 有两个取值：`heuristic`（默认，纯函数）与 `model`（一次小模型调用）。模型后端只借鉴 oh-my-pi 那条路的**契约**，不改变默认行为。
 
-**理由**：oh-my-pi 的分类器是一次真实的模型调用（`classifyOnline` / `classifyLocal`），每轮都要等它返回才能发请求；他们用 `tiny`/`smol` 角色、本地 on-device 模型、`retryTransientCompletion` 和 provisional level 来摊薄代价。我们按 D1 把"零延迟、确定性、可复现"放在首位，因此只抄那些**不增加调用**的部分。
+**契约（都是为了让「多一次调用」不变成「多一个故障点」）**：
 
-**如果将来要加**（接 U4）：DSH 有现成旁路——`purpose: 'session-title' | 'compaction'` 的调用不经过 `agent/request`，可以做成"低优先级、可关闭、失败回退启发式"的异步预取；他们"失败就抛错、由调用方回落"的做法是正确姿势。
+| 规则 | 理由 |
+|---|---|
+| 只在**没有 pin** 的轮次调用 | 用户写了 `ultrathink` 就是最强证据，不值得再花一次调用 |
+| 提示里只出现 `floor..ceiling` 之间的档位 | 策略上限（D14）不能被模型绕过；这是 oh-my-pi 用 `{{#if allowMax}}` 做的同一件事 |
+| 在 `agent/pre-step` 发起、在 `agent/request` await | 这段延迟与提示组装重叠，而不是加在后面 |
+| `AbortSignal.timeout` + 回合自己的 abort signal | 分类器永远不能拖住一轮 |
+| 任何失败（无模型/报错/超时/解析不出/无 route）→ 返回 `undefined` | 调用方保留它已经算好的启发式判定；这一轮照常跑（oh-my-pi 也是「抛错、由调用方回落」） |
+| 答案按 `route+candidates+text` 缓存（64 条） | 重试与重复消息不重复付费 |
+| 调用直接走 `ctx.llm.stream`，**不经过 `agent/request`** | 分类调用与被分类的请求在结构上不可能互相干扰 |
+| 每个档位的 `description` 参与渲染提示 | 自定义阶梯能向模型解释自己（`LevelSpec.description`） |
 
-**证据**：[oh-my-pi classifier.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts)、[thinking.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/thinking.ts)、[分类器 prompt](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/auto-thinking-difficulty.md)。
+**为什么默认仍然是启发式**：按 D1，默认路径要零延迟、确定性、可复现。模型后端每轮多一次请求（他们用 `tiny` 角色和本地 on-device 模型摊薄，我们没有等价的小模型角色概念，所以让用户指定 `classifierModel`）。
+
+**真机验证**（`deepseek-v4-flash` 作为分类器，同一句话）：启发式 `high` → 模型 `low`（模型判断它 trivial 并覆盖了启发式）；`classifierModel` 指向不存在的模型时回落到 `high` 且请求照常发出（`session-718b1f73`）。
+
+**证据**：`src/model-classifier.ts`、`tests/model-classifier.spec.ts`（15 个用例，含超时与四种失败）、`tests/wiring.spec.ts` 的 `model classifier` 组；[oh-my-pi classifier.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts)、[分类器 prompt](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/auto-thinking-difficulty.md)。
 
 ---
 

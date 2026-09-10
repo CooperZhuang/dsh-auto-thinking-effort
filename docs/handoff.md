@@ -7,14 +7,14 @@
 
 ## 0. 一句话现状
 
-插件 **v0.3.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
+插件 **v0.4.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
+分类有**两个后端**：默认纯启发式（零调用），`classifier: model` 时改用一次小模型调用（有超时、失败回落、pin 优先）。
 边界借鉴 oh-my-pi：**默认不低于 `low`、分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）、pin 只在正文匹配、钳制从下限一侧回答**（见 `docs/design.md` D13–D17）。
-已单测（91 个）、已真机验证（含真实 web profile 的 GUI）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
+已单测（116 个）、已真机验证（含真实 web profile 的 GUI 与模型分类的 A/B）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
-**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` 里**没有** `reasoningEffort`（= 新会话默认 Auto）；这是 v0.2 的预期状态（见 D12）。
-
+**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` 现在是 `deepseek-v4.1-flash-expires-on-0910` + **`reasoningEffort: high`**（用户在 GUI 里手动选了 High），所以**新会话现在走手动档**、插件不介入。想让新会话回到 Auto：在 GUI 里选一次 Auto（插件会把 effort 从落盘值里剥掉，见 D12），或删掉 settings.yaml 里那一行。
 ---
 
 ## 1. 这个项目要做什么
@@ -24,7 +24,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 流程：插件往 `ctx.llm.resolveModelInfo()` 的能力列表里注入合成档位 `auto` →
 用户在 GUI 选 Auto → `agent/pre-step` 读用户消息打分选档位 → `agent/request` 把 `auto` 换成模型真正支持的 effort。
 
-**不做什么**：不调模型分类、不改模型/provider/prompt、不管子代理（默认）、不碰 compaction 与会话标题请求。
+**不做什么**：默认不调模型分类（可选开启）、不改模型/provider/prompt、不管子代理（默认）、不碰 compaction 与会话标题请求。
 
 ---
 
@@ -34,7 +34,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 |---|---|
 | GitHub | https://github.com/CooperZhuang/dsh-auto-thinking-effort （public） |
 | 本地 | `C:\CodeRepository\dsh-auto-thinking-effort` |
-| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.3.0`（**未发布**） |
+| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.4.0`（**未发布**） |
 | Node / pnpm | v24.16.0 / 12.3.4（`packageManager` 已钉） |
 | DSH 依赖 | **`0.1.2-rc.1`**（npm `next` dist-tag，不是 `latest`） |
 | DSH CLI | `C:\Users\Cooper\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` |
@@ -54,7 +54,8 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | `src/signals.ts` | `BUILTIN_RULES`（pin + 加权，中英双语）、`compileRules`（拒绝 `g`/`y`，pin 默认 `proseOnly`） |
 | `src/classify.ts` | `classify`（pin → 加权 → 结构特征 → 分数带 → 裸接续继承 → **天花板**）、`stripNonProse`、`truncateForClassification` |
 | `src/state.ts` | `AgentState`：轮状态、steering 只升不降、`forTurn` 只认同一轮 |
-| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读，子代理默认跳过）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；disabled 时只做兜底改写） |
+| `src/model-classifier.ts` | **可选模型分类后端**：`buildClassifierPrompt`（用阶梯的 id+description 生成提示）、`parseClassifierAnswer`（取最早出现的档位词）、`runModelClassifier`（`ctx.llm.stream` + 超时 + 四种失败都返回 undefined） |
+| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读；子代理默认跳过；**在这里发起模型分类**）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；**在这里 await 分类结果**；disabled 时只做兜底改写） |
 | `scripts/inspect-session.mjs` | 逐帧解 `session.jsonl.zstd` 并打印关键事件（**多帧！**） |
 
 ---
@@ -74,6 +75,8 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | 请求头记账 | config 变了才追加 `request/header`（reason=change） | `dsh-agent-loop/lib/index.js:700-756` |
 | 子代理标记 | `session.header.origin === 'subagent'` | `dsh-session/lib/types/types.d.ts:79-83` |
 | bundle 不热加载 | `patchReload: live` 只监听 profile 的 `cordis.patch.yml` | `dsh-app-boot/lib/index.js:1075-1095` |
+| 分类调用的旁路 | 直接 `ctx.llm.stream(options)`，不带 `purpose`，因此**不经过 `agent/request`**；`GenerateOptions.purpose` 只认 `'compaction'` / `'session-title'` | `dsh-llm/lib/types/types.d.ts:379-416` |
+| 验证时隔离设置 | `settings-file` 插件行有 `path` 配置（默认是 harness home 下的 `settings.yaml`），可用 `--patch` 指向临时设置文件 | `dsh-settings-file/lib/types/index.d.ts:12-20` |
 
 ---
 
@@ -95,13 +98,18 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | 真机：下限生效（v0.3） | `dsh --profile headless "git status"` | `"low"`（v0.2 是 `off`） | `session-4987185c` |
 | 真机：pin 越过天花板（v0.3） | `dsh --profile headless "深入思考一下：…"` | `"max"` | `session-a82f0524` |
 | 真机：天花板挡住高分（v0.3） | 无 pin 的重负载长文本 | `"high"` | `session-771ee9b3` |
+| 真机：模型分类后端生效（v0.4） | 同一句话分别 `classifier: heuristic` / `classifier: model`（`deepseek-v4-flash`） | `high` → `low`（模型判断 trivial 并覆盖启发式） | `session-81e78e99` / `session-7de3b60c` |
+| 真机：分类器失败不破坏这一轮（v0.4） | `classifierModel` 指向不存在的模型 | 请求照常发出，回落到启发式 `high` | `session-718b1f73` |
 
-**只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`：真 cordis Context + 真 `installModelSelection` + 真 waterfall，且**故意先注册 selection**）：
+> 这两次比对用 `--patch` 把 `settings-file` 指向 `.verify/settings-verify.yaml`（临时设置，默认档位不带 effort），否则用户当前的 `reasoningEffort: high` 会让会话走手动档、插件根本不介入。
+
+**只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`：真 cordis Context + 真 `installModelSelection` + 真 waterfall，且**故意先注册 selection**）：
 
 - Auto 注入 / 放行 / 落盘剥离 / dispose 恢复 / 幂等 / 无 llm 服务降级
 - Auto 在没有分类结果时也必须落成真实档位（绝不把 `auto` 写进请求）
 - 钳制 / 查不到能力 / 无共享档位
 - 轮内 steering 只升不降、裸接续继承、跨轮不串档、手动档位原样返回
+- 模型分类：pin 时不调用、候选集只含 floor..ceiling、答案解析（含「最早出现」「不匹配更长单词」）、超时与四种失败都回落、缓存命中
 
 **未真机验证（已知缺口）**：
 
@@ -170,14 +178,15 @@ dsh --profile headless "深入思考一下：为什么…"
 
 ## 9. 交接清单
 
-- [x] 代码 + 单测（91 个）+ CI workflow
-- [x] Auto 档位注入（D10）与"手动优先"（D11）与全局默认守卫（D12）
-- [x] 边界策略对齐 oh-my-pi（D13 下限 / D14 上限 / D15 pin 只在正文 / D16 钳制方向 / D17 不抄模型分类）
+- [x] 代码 + 单测（116 个）+ CI workflow
+- [x] Auto 档位注入（D10）与「手动优先」（D11）与全局默认守卫（D12）
+- [x] 边界策略对齐 oh-my-pi（D13 下限 / D14 上限 / D15 pin 只在正文 / D16 钳制方向）
+- [x] **可选模型分类后端**（D17）：`classifier: heuristic|model`，真机 A/B 验证
 - [x] 真机挂载与请求头证据（含对照组）
 - [x] **GUI 真机验证**：Auto 出现并可选中、每轮自动、手动不被覆盖、默认不被污染
-- [x] v0.3 三条新真机证据（下限 / pin 越天花板 / 天花板挡高分）
+- [x] v0.3 / v0.4 真机证据（下限 / pin 越天花板 / 天花板挡高分 / 模型分类 A/B / 分类失败回落）
 - [x] 装进用户的 `web` profile（bundle 已追加；重启后生效）
 - [x] 设计决策与证据位置（`docs/design.md` D1–D17）
-- [x] 中英 README，含"真机验证 / 仅单测 / 未验证"三张表 + oh-my-pi 对比表
+- [x] 中英 README，含「真机验证 / 仅单测 / 未验证」三张表 + oh-my-pi 对比表
 - [ ] 真实子代理跳过验证（U2）
 - [ ] 发布到 npm

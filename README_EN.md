@@ -22,11 +22,36 @@ After installing, the effort menu becomes **Auto / Off / Low / High / Max** (`Au
 
 So "how do I specify it manually?" needs no extra mechanism: **pick a concrete gear**. The plugin only acts when the request carries Auto (or carries no effort at all).
 
-### Boundaries
+### Two classifier backends
 
+| `classifier` | How the level is decided | Latency / cost |
+|---|---|---|
+| `heuristic` (default) | a pure function: weighted regex rules + structural features | zero |
+| `model` | **one small-model call**: the allowed levels and their descriptions go into a system prompt, the model answers with a single word | +1 small request per turn (hard timeout) |
+
+The model backend's contract:
+
+- **Only called on turns without a pin.** If the user wrote `ultrathink` / `think hard` / `深入思考`, that call is skipped — a pin always wins.
+- **Offered only the allowed levels**: the candidates are the ladder rungs between `autoFloorLevel` and `autoCeilingLevel`, so the policy ceiling cannot be talked around; fewer than two candidates means no call at all.
+- **Started at `agent/pre-step`, awaited at `agent/request`**, so the latency overlaps prompt assembly; `classifierTimeoutMs` is a hard deadline on top.
+- **Every failure falls back to the heuristic decision**: missing model, stream error, timeout, unparsable answer — the turn runs normally with the heuristic level.
+- Answers are cached by text (same message, same route, same candidate set: no repeat call; 64 entries).
+- A level's `description` is rendered into the prompt, so a custom ladder explains itself to the model; without one the id is used.
+
+```yaml
+- id: auto-thinking-effort
+  config:
+    classifier: model
+    # point this at a small, fast model; empty uses the session's own route
+    classifierModel: deepseek-official/deepseek-v4-flash
+    classifierTimeoutMs: 8000
+    classifierMaxTokens: 64
+```
+
+### Boundaries
 - **Only `reasoningEffort` changes.** Provider, model, system prompt, and message list are never touched. The worst case is a turn that thinks more or less than it needed — never a different conversation.
 - **The Auto id never reaches a provider.** It is a picker marker; `agent/request` turns it into a real rung before `prepareCall` runs. Even with `enabled: false` a fallback listener stays registered so a stored Auto cannot leak into a request.
-- **No classifier model call.** Classification is a pure function (regex + structural features): zero latency, zero cost, unit-testable, reproducible. The tradeoff is honest — it reads *shape and vocabulary*, not meaning — so the default band is the provider's normal effort rather than the cheapest one.
+- **Two classifier backends, and no model call by default.** The default is a pure function (regex + structural features): zero latency, zero cost, unit-testable, reproducible. Set `classifier: model` to have a small model judge the request instead (see below). The default band stays the provider's normal effort rather than the cheapest one.
 - **Auto never pollutes the global default**: the plugin intercepts `agent-default-model.saveSelection` and strips Auto, persisting "no explicit effort" instead. A profile without this plugin then reads the provider default instead of an id it cannot resolve.
 
 ---
@@ -169,6 +194,10 @@ Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest
 | `autoWhenUnset` | `true` | Treat a request with no explicit effort as auto too. |
 | `autoFloorLevel` | `low` | Weakest level `auto` may resolve to; set it to the ladder's weakest rung to allow switching thinking off. |
 | `autoCeilingLevel` | `high` | Highest **score-derived** level; pins bypass it. |
+| `classifier` | `heuristic` | Which backend decides: `heuristic` (pure function) or `model` (one small-model call). |
+| `classifierModel` | `''` | Route for that call, `provider/model`; empty uses the session's own route. |
+| `classifierTimeoutMs` | `8000` | Hard deadline for one classifier call, in milliseconds. |
+| `classifierMaxTokens` | `64` | Output cap for the classifier call (it answers with one word). |
 | `applyToSubagents` | `false` | Also classify subagent children (their route is usually chosen by the caller). |
 | `inheritOnContinuation` | `true` | Bare continuations keep the previous level. |
 | `logDecisions` | `true` | One info line per turn: level, score, reasons. |
@@ -200,14 +229,14 @@ References: [`auto-thinking/classifier.ts`](https://github.com/can1357/oh-my-pi/
 
 | Dimension | oh-my-pi | This plugin |
 |---|---|---|
-| Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | pure heuristics, **zero calls** |
+| Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | **configurable**: pure heuristics by default (zero calls); `classifier: model` makes it a small-model call too |
 | Where `auto` lives | an agent-local selector that is **never an Effort**, resolved before provider mapping | a synthetic gear injected into the model's rung list (DSH has no contribution hook) |
 | Floor | never below `low` | same by default (`autoFloorLevel`) |
 | Ceiling | default `xhigh` (one below top); only `ultrathink` reaches `max` | default `high`; only an explicit pin reaches `max` |
 | Clamping | highest pooled rung not exceeding the request | aligned (see above) |
 | Failure | throws → caller falls back to the provisional level and continues | no record → default band; never throws on the request path |
 
-**What we did not copy**: the small-model classifier. It costs an extra model call per turn (they amortize it with a tiny or local model); we keep zero latency, determinism, and reproducibility as the top priority (`docs/design.md` D1). If it is ever added, DSH has a bypass: `purpose: 'session-title' | 'compaction'` calls do not go through `agent/request` (D17/U4).
+**Both sides have it**: the model-classifier backend. They only have that path; we ship it as an option that is **off by default** — `docs/design.md` D1 keeps zero latency, determinism, and reproducibility first. When enabled it follows D17's contract: never called on a pinned turn, started at `agent/pre-step` and awaited at `agent/request`, and any timeout or failure falls back to the heuristic level.
 
 ---
 
@@ -262,8 +291,10 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Real run: floor applies | `dsh --profile headless "git status"` | `reasoningEffort: "low"` (no longer `off`) | `session-4987185c` |
 | Real run: pin crosses the ceiling | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-a82f0524` |
 | Real run: ceiling holds a heavy score back | long no-pin text (why+codebase+deadlock+analyze+prove+design+migration…) | `reasoningEffort: "high"` (score qualifies for `max`, ceiling blocks it) | `session-771ee9b3` |
+| Real run: the model backend decides | the same prompt (quote the first README paragraph) with `classifier: heuristic` vs `classifier: model` (`deepseek-v4-flash`) | heuristic `high` → model `low`: the model judged it trivial and overrode the heuristics | `session-81e78e99` / `session-7de3b60c` |
+| Real run: a failing classifier cannot break the turn | `classifierModel` pointing at a nonexistent model | the request went out normally, effort fell back to the heuristic `high` | `session-718b1f73` |
 
-**Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
+**Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 
 | Scenario | Note |
 |---|---|

@@ -23,10 +23,9 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 `dsh plugin --profile <name> add dsh-auto-thinking-effort`. It also ships a
 **browser half** (`dsh.client` → `lib/client.js`, hand-written in the client
 module system's bundle format) that contributes its own settings page
-(Settings → 自动思考强度) plus a card under Settings → Plugins, and it registers
-a **settings namespace**, so that page, that card, a hand edit of
-`~/.dsh/settings.yaml`, and the composition row all configure the same resolved
-value.
+(Settings → 自动思考强度), and it registers a **settings namespace**, so that
+page, a hand edit of `~/.dsh/settings.yaml`, and the composition row all
+configure the same resolved value.
 
 ## Hard constraints (do not "fix" these away)
 
@@ -101,14 +100,12 @@ value.
   platform table, and the surfaces bind nothing but `ctx.slots`,
   `ctx.settingsScope`, and the model catalog read through
   `ctx.inject(['remote', 'remote.session'], …)` (`docs/design.md` D19/D20).
-- **The plugin owns a page, not only a card.** `settings.section` is keyed by
-  this plugin's own id (`auto-thinking-effort`, `order: 12`, label
-  「自动思考强度」) and is the surface users actually look for; the Plugins card
-  is kept alongside it. Both render one shared form component over one scope.
-- **A card is keyed by the settings namespace it edits.** The Plugins section
-  pairs a served namespace with the card registered under that same key and
-  renders nothing for a namespace nobody claims — so the namespace name is a
-  contract shared by `SETTINGS_NAMESPACE` and the client half.
+- **The plugin owns one settings page and no Plugins card.** `settings.section`
+  is keyed by this plugin's own id (`auto-thinking-effort`, `order: 12`, label
+  「自动思考强度」); the `settings.plugin.item` registration was deliberately
+  removed once the page existed, because a second copy of the same form in the
+  plugin list only creates doubt (`docs/design.md` D19/D20). Registering a card
+  again is a product decision, not a fix.
 
 ## Conventions
 

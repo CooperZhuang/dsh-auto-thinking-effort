@@ -47,9 +47,13 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
   here would break routing and cache expectations; it is out of scope by design.
 - **Never mutate the composed config.** Return a new object only when the effort
   actually changes; otherwise return the same object the loop handed us.
-- **No model call in classification.** The classifier runs on the turn's critical
-  path. Determinism and zero latency are the whole point (see `docs/design.md`
-  D1). A model-assisted classifier is an open question, not an invitation.
+- **The default classifier makes no model call.** The heuristic path stays pure,
+  synchronous, and deterministic (D1). `classifier: model` is the one sanctioned
+  exception: it runs through `src/model-classifier.ts`, never through
+  `agent/request`, always under a timeout, and **any** failure resolves to
+  `undefined` so the turn continues on the heuristic level (D17). A pinned turn
+  is never sent to it either — a pin is the user speaking, and a model must not
+  be able to outvote an explicit `ultrathink`.
 - **Never throw on the request path.** Every failure path returns the composed
   config unchanged — except a gear, which must be replaced or dropped.
 - **`g` / `y` regex flags are rejected** (`src/signals.ts`): a stateful

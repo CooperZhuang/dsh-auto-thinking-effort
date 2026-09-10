@@ -73,6 +73,17 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 - **Clamping answers from the floor side.** The pool is filtered by the floor
   first and the request only picks within it; nearest-rung matching was removed
   because it violates the floor on sparse ladders (D16).
+- **Settings are reached through `ctx.inject(['settings'], …)`, never a plain
+  `ctx.get('settings')`.** Cordis only hands out a service whose providing fiber
+  is already active, and the settings provider loads its document
+  asynchronously, so `ctx.get` silently returns `undefined` here — the plugin
+  then runs on the composition row and the user layer is ignored (measured on
+  real hardware, `docs/design.md` D18). The inject callback is also the correct
+  "optional dependency" shape: it never fires in a deployment with no provider.
+- **The composition row is the settings *base* layer, the user layer wins.**
+  `adopt()` re-validates every change and keeps the running runtime when one is
+  rejected; `validate` refuses the bad *write* in the first place. Do not turn
+  either guard into an unconditional adoption (`docs/design.md` D18).
 
 ## Conventions
 

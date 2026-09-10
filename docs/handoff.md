@@ -1,20 +1,20 @@
 # 交接文档 — dsh-auto-thinking-effort
 
 > **给接手的人（或下一个会话的 agent）**：本文件是自包含的。你不需要之前的对话记录。
-> 最后更新：2026-09-09。`pnpm check` 全绿（77 测试），真机验证见 §5。
+> 最后更新：2026-09-10。`pnpm check` 全绿（123 测试），真机验证见 §5。
 
 ---
 
 ## 0. 一句话现状
 
-插件 **v0.5.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
+插件 **v0.6.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
 分类有**两个后端**：默认纯启发式（零调用），`classifier: model` 时改用一次小模型调用（有超时、失败回落、pin 优先）。
 边界可配：**下限默认不设（可以到 `off`）**、**分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）**、pin 只在正文匹配、钳制从下限一侧回答（见 `docs/design.md` D13–D17）。
-已单测（117 个）、已真机验证（含真实 web profile 的 GUI、模型分类 A/B、下限两侧）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
-
+v0.6 新增：插件注册了一个 settings 命名空间 `auto-thinking-effort`，**profile 行是 base 层、`~/.dsh/settings.yaml` 同名段是用户层（优先且热生效）** —— 改完不用重启 `dsh web`（D18，真机验证见 §5）。
+已单测（123 个）、已真机验证（含真实 web profile 的 GUI、模型分类 A/B、下限两侧、settings 用户层、**同一进程内热重配**）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
-**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。`web` profile 的 `cordis.patch.yml` 里有一条 `auto-thinking-effort` 覆盖行，把 `classifier` 设成 `model` + `deepseek-v4-flash`。
+**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。同文件的 `auto-thinking-effort:` 段写了 `classifier: model` + `classifierModel: deepseek-official/deepseek-v4-flash` + `autoFloorLevel: minimal` + `autoCeilingLevel: high`；`web` profile 的 `cordis.patch.yml` 里那条 `auto-thinking-effort` 覆盖行（同样把分类后端设成 model）**保留作为 base 层**，兼顾旧版本。注意：用户当前跑着的 `dsh web`（10:13 之前启动的进程）仍是 v0.5 的 bundle，**要重启才加载 v0.6 的 settings 命名空间**（bundle 不热加载）。
 ---
 
 ## 1. 这个项目要做什么
@@ -55,7 +55,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | `src/classify.ts` | `classify`（pin → 加权 → 结构特征 → 分数带 → 裸接续继承 → **天花板**）、`stripNonProse`、`truncateForClassification` |
 | `src/state.ts` | `AgentState`：轮状态、steering 只升不降、`forTurn` 只认同一轮 |
 | `src/model-classifier.ts` | **可选模型分类后端**：`buildClassifierPrompt`（用阶梯的 id+description 生成提示）、`parseClassifierAnswer`（取最早出现的档位词）、`runModelClassifier`（`ctx.llm.stream` + 超时 + 四种失败都返回 undefined） |
-| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读；子代理默认跳过；**在这里发起模型分类**）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；**在这里 await 分类结果**；disabled 时只做兜底改写） |
+| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读；子代理默认跳过；**在这里发起模型分类**）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；**在这里 await 分类结果**；disabled 时只做兜底改写）、**settings 命名空间**（`SETTINGS_NAMESPACE`、`ctx.inject(['settings'])` → `register`/`adopt`/`watch`，见 D18） |
 | `scripts/inspect-session.mjs` | 逐帧解 `session.jsonl.zstd` 并打印关键事件（**多帧！**） |
 
 ---
@@ -77,6 +77,8 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | bundle 不热加载 | `patchReload: live` 只监听 profile 的 `cordis.patch.yml` | `dsh-app-boot/lib/index.js:1075-1095` |
 | 分类调用的旁路 | 直接 `ctx.llm.stream(options)`，不带 `purpose`，因此**不经过 `agent/request`**；`GenerateOptions.purpose` 只认 `'compaction'` / `'session-title'` | `dsh-llm/lib/types/types.d.ts:379-416` |
 | 验证时隔离设置 | `settings-file` 插件行有 `path` 配置（默认是 harness home 下的 `settings.yaml`），可用 `--patch` 指向临时设置文件 | `dsh-settings-file/lib/types/index.d.ts:12-20` |
+| 注册配置命名空间 | `ctx.settings.register(ns, schema, { base, applies: 'live', validate })` → `SettingsScope{ get, watch, update, replace }`；解析 = schema 默认 → `base` → 用户层；`validate` 抛错会**拒绝写入**并保留上一份 | `dsh-settings/lib/index.js:270-291`（register）、`:478-515`（publish/resolve）、`:238-251`（service init 时读文档） |
+| 读服务要 inject | `ctx.get(name, strict=true)` 只返回**提供它的 fiber 已 active** 的服务（“without the inject requirement” 要走 `ctx.reflect`）；正确写法是 `ctx.inject(deps, cb)`（等价 `ctx.plugin({ inject, apply })`：服务出现时回调、替换时重跑、永不存在时永不执行） | `cordis/lib/index.js:762-769`；`cordis/lib/types/reflect.d.ts:5-13`；`cordis/lib/types/registry.d.ts:104-111`；DSH 自己的用法：`dsh-agent-default-model/lib/index.js:44`、`dsh-theme/lib/index.js:87` |
 
 ---
 
@@ -101,6 +103,8 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | 真机：天花板挡住高分（v0.3） | 无 pin 的重负载长文本 | `"high"` | `session-771ee9b3` |
 | 真机：模型分类后端生效（v0.4） | 同一句话分别 `classifier: heuristic` / `classifier: model`（`deepseek-v4-flash`） | `high` → `low`（模型判断 trivial 并覆盖启发式） | `session-81e78e99` / `session-7de3b60c` |
 | 真机：分类器失败不破坏这一轮（v0.4） | `classifierModel` 指向不存在的模型 | 请求照常发出，回落到启发式 `high` | `session-718b1f73` |
+| **真机：settings 用户层在加载期被读到（v0.6）** | `--patch` 把 `settings-file` 指到 `.verify/settings-user-layer.yaml`（只有用户层写 `autoFloorLevel: low`，base 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `"low"`（base 单独跑同句是 `"off"`） | `session-518c09e2` vs `session-3af16e67` |
+| **真机：跑着的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（PID 18604，10:03:40 启动，全程未重启），对同一句 `why does the whole codebase deadlock? prove the invariant.`：文件里先 `autoCeilingLevel: max`，改成 `high` 后再发一次，再改回 `max` 又发一次 | 同一进程内 `request/header` 随文件变化（provider 自己的默认是 `high`，因此 `max` 只可能来自插件） | `session-0f47f1c6`（high） / `session-b7f7a469`（max）；最终构建单点复核 `session-ce7ffac5`（max） |
 
 > 这两次比对用 `--patch` 把 `settings-file` 指向 `.verify/settings-verify.yaml`（临时设置，默认档位不带 effort），否则用户当前的 `reasoningEffort: high` 会让会话走手动档、插件根本不介入。
 
@@ -111,6 +115,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 - 钳制 / 查不到能力 / 无共享档位
 - 轮内 steering 只升不降、裸接续继承、跨轮不串档、手动档位原样返回
 - 模型分类：pin 时不调用、候选集只含 floor..ceiling、答案解析（含「最早出现」「不匹配更长单词」）、超时与四种失败都回落、缓存命中
+- **settings 命名空间（6 个）**：注册参数（名字/base/`applies: 'live'`）、没挂 provider 时降级到 composition 行、用户层在加载期优先、watch 提交后重配（同一个 harness 里两次分类结果不同）、`enabled: false` 后不再广告档位但兜底仍生效、非法提交保留上一份配置。（harness 新增 `settle()`：注入回调不在 `apply` 的同步路径上。）
 
 **未真机验证（已知缺口）**：
 
@@ -140,6 +145,8 @@ node scripts\inspect-session.mjs <session-dir> --grep "request/header"
 9. **自定义 profile 名只会初始化成 `[dsh-base]`**：要 web 行为得手动把 `@deepseek-ai/dsh-web-app` 加进 `dsh.profile.bundles`（in-box bundle 从全局安装解析）。
 10. **改 bundle 不热加载**：装/卸插件要重启 `dsh web` 才生效（`patchReload: live` 只管 `cordis.patch.yml`）。
 11. **GUI 里选档位会写全局默认**：`selectModel` 末尾会 `agentDefaultModel.saveSelection(...)`。这正是 D12 那道守卫存在的原因——**别删**。
+12. **cordis 里 `ctx.get(name)` 读不到“fiber 还没 active”的服务**（而 DSH 的 settings provider 正是异步读完文档的）；要用 `ctx.inject([...], cb)`。第一版用 `ctx.get('settings')` 真机**静默失效**：用户层写了 `autoFloorLevel: low`，跑出来还是 `off`，唯一线索是“把一个非法值写进去也不报错”（如果真注册了，`validate` 会当场拒统）。排查手法记一下：**拿一个必然非法的值去戳，看有没有声音**。
+13. **手改 `~/.dsh/settings.yaml` 时别把下一段的 key 吃掉**：这次差点把 `dsh-better-sidebar:` 这行删成注释，结果整个 sidebar 的键被归到本插件命名空间下。改完用真 yaml 解析器验一下（`yaml.parseDocument(...).errors` + 打印 section 名），因为 settings provider 只会觉得“这一段多了一些键”。
 
 ---
 
@@ -149,7 +156,8 @@ node scripts\inspect-session.mjs <session-dir> --grep "request/header"
 2. **U3 非 DeepSeek provider**：接一个声明 3 档或 5 档的 provider，验证钳制。
 3. **发布**：`pnpm publish`（`prepublishOnly` 会构建）；发布后把 README 的安装命令改成包名优先。
 4. **U6 卸载安全**：现在卸载后选着 Auto 的会话会报错。可选方案：给 profile 加一条 `cordis.patch.yml` 兜底行（把 `auto` 映射到 provider 默认），或做一个"插件缺失时自动降级"的 companion。
-5. 可选：给 GUI 加"本轮档位"只读显示（需要 client 插件，目前是 host 单半）。
+5. 可选：给 GUI 加“配置菜单”（`settings.plugin.item` 卡片），现在是 host 半边（命名空间已注册，GUI 只读清单里能看到，没有通用表单）。
+6. 可选：给 GUI 加“本轮档位”只读显示（需要 client 插件，目前是 host 单半）。
 
 ---
 
@@ -187,7 +195,8 @@ dsh --profile headless "深入思考一下：为什么…"
 - [x] **GUI 真机验证**：Auto 出现并可选中、每轮自动、手动不被覆盖、默认不被污染
 - [x] v0.3 / v0.4 真机证据（下限 / pin 越天花板 / 天花板挡高分 / 模型分类 A/B / 分类失败回落）
 - [x] 装进用户的 `web` profile（bundle 已追加；重启后生效）
-- [x] 设计决策与证据位置（`docs/design.md` D1–D17）
+- [x] 设计决策与证据位置（`docs/design.md` D1–D18）
+- [x] **settings 命名空间 + 热重配（D18）**：真机验证用户层生效与同一进程内热重配；用户 `web` profile 与 `~/.dsh/settings.yaml` 已接好
 - [x] 中英 README，含「真机验证 / 仅单测 / 未验证」三张表 + oh-my-pi 对比表
 - [ ] 真实子代理跳过验证（U2）
 - [ ] 发布到 npm

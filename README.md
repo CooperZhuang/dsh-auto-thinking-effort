@@ -208,6 +208,33 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | `logDecisions` | `true` | 每轮打一行 info 日志：档位、分数、理由。 |
 | `maxChars` | `8000` | 分类时最多看多少字符（超长会保留头 60% + 尾 40%）。 |
 
+### 写在 `settings.yaml` 里：改完立即生效
+
+v0.6 起插件注册了一个 settings 命名空间 `auto-thinking-effort`，所以配置分两层：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| base | profile 的 `cordis.patch.yml`（就是上面那段 `config:`） | 插件挂载点 + 兜底值 |
+| **用户层** | `~/.dsh/settings.yaml` 的 `auto-thinking-effort:` 段 | **优先**，且改完立即生效 |
+
+解析顺序是 *schema 默认值 → base → 用户层*。命名空间用 `applies: live` + watch 注册：**改完文件，正在跑的 host 立刻重新配置**，不需要重启 `dsh web`，也不需要重装 bundle。
+
+```yaml
+# ~/.dsh/settings.yaml
+auto-thinking-effort:
+  classifier: model
+  classifierModel: deepseek-official/deepseek-v4-flash
+  autoFloorLevel: minimal   # minimal = 不设下限（可以到 off）
+  autoCeilingLevel: high    # 分数算出来的档位不超过它；pin 不受约束
+```
+
+细节：
+
+- 生效时会打一行 info 日志：`reconfigured from auto-thinking-effort — gear …, bounds …, classifier=…`。
+- **写到不合法的值不会把会话弄坏**：schema 或跨字段校验（比如下限排到上限上面、`autoFloorLevel` 写了不存在的档位）会拒绝这次写入，保留上一份可用配置并警告。
+- 插件**不依赖** `@deepseek-ai/dsh-settings`（接口是按结构声明的，见 `src/index.ts`）：没挂 settings provider 时它就只用 profile 那一行配置，照常工作。
+- 命名空间通过 `ctx.inject(['settings'])` 注册（服务要等提供它的 fiber 起来才读得到），所以 provider 晚于本插件挂载也没问题。
+
 ### 规则写法
 
 - `pattern`：正则源码，默认大小写不敏感（`flags: 'i'`）。**禁止 `g` / `y`**——它们会让 `lastIndex` 有状态，同一个函数对不同调用给出不同答案。
@@ -299,6 +326,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | 真机：天花板挡住高分 | 无 pin 的重负载长文本（why+codebase+deadlock+analyze+prove+design+migration…） | `reasoningEffort: "high"`（分数够 `max` 但被天花板拦住） | `session-771ee9b3` |
 | 真机：模型后端生效 | 同一句话（把 README 第一段原样念一遍）分别用 `classifier: heuristic` 与 `classifier: model`（`deepseek-v4-flash`）跑 | 启发式 `high` → 模型 `low`：模型判断它 trivial 并覆盖了启发式 | `session-81e78e99` / `session-7de3b60c` |
 | 真机：分类器失败不影响这一轮 | `classifierModel` 指向一个不存在的模型 | 请求照常发出，档位回落到启发式的 `high` | `session-718b1f73` |
+| **真机：`settings.yaml` 用户层生效（v0.6）** | `--patch` 把 `settings-file` 指到临时设置文件，里面只写 `auto-thinking-effort: { autoFloorLevel: low }`（profile 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `reasoningEffort: "low"`（profile 行单独跑同一句是 `"off"`） | `session-518c09e2` vs `session-3af16e67`；最终构建复核 `session-de9b7ee1` |
+| **真机：正在跑的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（全程未重启）：启动时文件里是 `autoCeilingLevel: max`，先改成 `high` 发一轮，再改回 `max` 发同一轮 | 同一进程内 `request/header` 随文件变化（`high` / `max`）；provider 自己的默认是 `high`，所以 `max` 只可能来自插件 | `session-0f47f1c6` / `session-b7f7a469`；最终构建复核（启动值为 `high`，改文件后拿到 `max`）`session-ce7ffac5` |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 
@@ -308,12 +337,14 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | Auto 在没有分类结果时也要落成真实档位 | `tests/wiring.spec.ts`：`reasoningEffort` 永远不是 `auto` |
 | 钳制 / 查不到能力 / 无共享档位 | 用假 `llm` 服务覆盖 |
 | 轮内 steering 只升不降、裸接续继承、跨轮不串档 | 见 `tests/state.spec.ts`、`tests/wiring.spec.ts` |
+| **settings 命名空间**（注册参数、无 provider 降级、用户层优先、watch 后重配、禁用后拆档位、非法值保留上一份） | `tests/wiring.spec.ts` 的 `settings namespace` 组（6 个），用假 settings provider 模拟 `register`/`watch` 契约 |
 
 **没有真机验证的**（已知缺口，不要当成已验证）：
 
 - **真实子代理会话**的跳过行为（`applyToSubagents: false`）：只在进程内用假 session header 测过。
 - **非 DeepSeek provider** 的钳制路径：只用假 `resolveModelInfo` 测过。
 - **插件卸载后仍有会话选着 Auto**：预期表现是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（`prepareCall` 故意不包），但没有真机跑过。
+- **GUI 里没有本插件的配置表单**：命名空间已注册（会出现在「设置 → 插件」的只读清单里），但目前只能手改 `settings.yaml`。
 
 复现真机结果：
 

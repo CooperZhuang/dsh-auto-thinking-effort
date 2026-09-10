@@ -235,6 +235,33 @@
 **真机验证**（`deepseek-v4-flash` 作为分类器，同一句话）：启发式 `high` → 模型 `low`（模型判断它 trivial 并覆盖了启发式）；`classifierModel` 指向不存在的模型时回落到 `high` 且请求照常发出（`session-718b1f73`）。
 
 **证据**：`src/model-classifier.ts`、`tests/model-classifier.spec.ts`（15 个用例，含超时与四种失败）、`tests/wiring.spec.ts` 的 `model classifier` 组；[oh-my-pi classifier.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/auto-thinking/classifier.ts)、[分类器 prompt](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/auto-thinking-difficulty.md)。
+---
+
+## D18 — 配置有两个层：profile 行是 base，`settings.yaml` 是用户层（且热生效）
+
+**决定**：插件在 `ctx.settings` 上注册命名空间 `auto-thinking-effort`（`applies: 'live'`），把 profile 那一行 `config:` 当作 **base 层**、把 `~/.dsh/settings.yaml` 的同名段当作 **用户层**。解析顺序：schema 默认值 → base → 用户层，用户层优先。
+
+**为什么**：
+
+| 问题 | 这一层解决的 |
+|---|---|
+| 改一个上限要重启 `dsh web` | 命名空间是 `live` 的：文件一改，**跑着的 host 自己重配**（跟 settings 的 watch/commit 同一条路）。bundle 不热加载（陷阱 #10），但 settings 热生效，两者互补。 |
+| 一个以 id 为目标的 profile 覆盖**会替换整行 config**，写一个键得重述全部键 | 用户层是**合并**的：只写想改的键。 |
+| 插件不想把 `@deepseek-ai/dsh-settings` 变成硬依赖 | 接口按**结构**声明（`SettingsRegistry`/`SettingsScope`，镜像 `dsh-settings/lib/types/index.d.ts:206`/`:84-113`）；没挂 provider 就跑 profile 行。 |
+| 写错配置把正在跑的会话弄坏 | `validate` 里调 `prepareConfig`：跨字段非法（下限排到上限上面、bound 写了不存在的档位）在**写入点**就被拒，保留上一份可用配置并警告。 |
+
+**为什么用 `ctx.inject(['settings'])` 而不是 `ctx.get('settings')`**：cordis 里服务只有“提供它的 fiber 已 active”才读得到（`context.d.ts`：`get(name, strict=true)`，“without the inject requirement” 要走 `ctx.reflect`），而 settings provider 的文档是异步读完的。第一版用 `ctx.get` 实测**静默拿不到服务**（真机：`autoFloorLevel: low` 完全不生效）。`ctx.inject` 是 DSH 自己的写法（`dsh-agent-default-model/lib/index.js:44`、`dsh-theme/lib/index.js:87` 等 15+ 处），它会在服务出现时回调、在服务替换时重跑，而且在没有 provider 的部署里**永远不会执行** —— 正好是“可选依赖”的语义。
+
+**真机验证**：
+
+| 场景 | 做法 | 结果 | 证据 |
+|---|---|---|---|
+| 用户层在加载期被读到 | `dsh --profile headless --patch <settings 指向临时文件>`，文件里 `autoThinkingEffort.autoFloorLevel: low`（base 行仍是 `minimal`） | `git status` → `low`（base 单独跑同句是 `off`） | `session-518c09e2` vs `session-3af16e67` |
+| **跑着的 host 热重配** | 同一个 `dsh --profile web --port 0` 进程（PID 18604，10:03:40 启动，全程未重启），10:05 把 `autoCeilingLevel` 从 `max` 改成 `high` → 发同一句重负载；10:08 改回 `max` → 再发同一句。最终构建上又做了一次单点复核：启动值 `high`，改文件为 `max` 后同一句拿到 `max` | turn A → `high`，turn B → `max`（只有文件变了；provider 自己的默认是 `high`，所以 `max` 只可能来自插件） | `session-0f47f1c6` / `session-b7f7a469`；最终构建 `session-ce7ffac5` |
+
+**代价 / 边界**：非法的**外部**编辑由 settings 层拦住（保留上一份 + 警告）；`adopt()` 里那次 `buildRuntime` 的 try/catch 是第二道防线（provider 忽略 `validate` 时仍不会把会话弄坏）。档位改动（`autoEffortId`/name/description）会被识别并重新安装 Auto 档位；`enabled` 翻转同样会重装/拆掉，但兜底 listener 永远留着（D10）。重配会清掉 `warned`/能力缓存/分类缓存；**不清**已有的 `AgentState`（每轮记录）—— 它只按 id 比强弱（找不到当 -1），清掉反而会让进行中的一轮丢掉自己的决策。
+
+**证据**：`src/index.ts`（`SETTINGS_NAMESPACE`、`ctx.inject` 块）、`tests/wiring.spec.ts` 的 `settings namespace` 组（6 个用例：注册参数、无 provider 降级、用户层在加载期生效、热重配、禁用后不再广告档位、非法值保留上一份）。
 
 ---
 
@@ -247,5 +274,6 @@
 | U4 | 是否要一条可选的模型分类兜底（D1） | 不做（见 D17）；若要做，必须在 `agent/pre-step` 之外异步预取（`purpose: 'session-title'/'compaction'` 的旁路），且失败时回退启发式 |
 | U5 | 是否允许规则级 `model` 覆盖（"难题换更强模型"） | 与 D2 冲突，暂不做 |
 | U6 | 卸载插件后仍有会话选着 Auto | 预期是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（D10 的 `prepareCall` 不包策略）；没真机跑过 |
+| U7 | GUI 里有没有“配置菜单”（表单） | 该命名空间会在「设置 → 插件」的只读清单里出现，但没有通用表单；目前要手改 `settings.yaml`（host 半边已完成） |
 
 > **U1（同会话跨轮切换的真机验证）已关闭**：真机 GUI 会话 `session-11eeae50` 里，turn 1（Auto）写 `off`、turn 2（手动 Low）写 `low`，同一会话两条不同的 `request/header`。

@@ -202,6 +202,33 @@ Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest
 | `logDecisions` | `true` | One info line per turn: level, score, reasons. |
 | `maxChars` | `8000` | Characters inspected per turn (long text keeps its head 60% + tail 40%). |
 
+### Writing it in `settings.yaml`: takes effect live
+
+Since v0.6 the plugin registers a settings namespace named `auto-thinking-effort`, so configuration has two layers:
+
+| Layer | Where | Role |
+|---|---|---|
+| base | the profile's `cordis.patch.yml` (the `config:` block above) | mount point + fallback values |
+| **user layer** | the `auto-thinking-effort:` section of `~/.dsh/settings.yaml` | **wins**, and applies immediately |
+
+Resolution order is *schema defaults → base → user layer*. The namespace is registered with `applies: live` and a watcher: **edit the file and the running host reconfigures at once** — no `dsh web` restart and no reinstall.
+
+```yaml
+# ~/.dsh/settings.yaml
+auto-thinking-effort:
+  classifier: model
+  classifierModel: deepseek-official/deepseek-v4-flash
+  autoFloorLevel: minimal   # minimal = no floor (auto may switch thinking off)
+  autoCeilingLevel: high    # score-derived levels stop here; a pin ignores it
+```
+
+Details:
+
+- Each adoption logs one info line: `reconfigured from auto-thinking-effort — gear …, bounds …, classifier=…`.
+- **An invalid edit cannot break a session**: a schema failure or a cross-field one (a floor ranking above the ceiling, an `autoFloorLevel` naming no level) is refused at the write site; the last good configuration keeps running and a warning is logged.
+- The plugin does **not** depend on `@deepseek-ai/dsh-settings` (the interface is declared structurally, see `src/index.ts`): with no settings provider mounted it simply runs on the profile row.
+- The namespace is registered through `ctx.inject(['settings'])` — a service is only readable once its providing fiber is active — so a provider that mounts after this plugin is still picked up.
+
 ### Rule shape
 
 - `pattern`: regex source, case-insensitive by default (`flags: 'i'`). **`g` / `y` are rejected** — a stateful `lastIndex` makes the classifier's answer depend on call order.
@@ -293,6 +320,8 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Real run: ceiling holds a heavy score back | long no-pin text (why+codebase+deadlock+analyze+prove+design+migration…) | `reasoningEffort: "high"` (score qualifies for `max`, ceiling blocks it) | `session-771ee9b3` |
 | Real run: the model backend decides | the same prompt (quote the first README paragraph) with `classifier: heuristic` vs `classifier: model` (`deepseek-v4-flash`) | heuristic `high` → model `low`: the model judged it trivial and overrode the heuristics | `session-81e78e99` / `session-7de3b60c` |
 | Real run: a failing classifier cannot break the turn | `classifierModel` pointing at a nonexistent model | the request went out normally, effort fell back to the heuristic `high` | `session-718b1f73` |
+| **Real run: the `settings.yaml` user layer is honoured (v0.6)** | `--patch` pointing `settings-file` at a scratch file holding only `auto-thinking-effort: { autoFloorLevel: low }` (the profile row still says `minimal`), then `dsh --profile headless "git status"` | `reasoningEffort: "low"` (the profile row alone gives `"off"` for that prompt) | `session-518c09e2` vs `session-3af16e67`; final build re-checked in `session-de9b7ee1` |
+| **Real run: a running host reconfigures live (v0.6)** | one `dsh --profile web --port 0` process, never restarted: it booted with `autoCeilingLevel: max`, the file was changed to `high` and one turn sent, then changed back to `max` and the same turn sent again | `request/header` followed the file inside one process (`high` / `max`); the provider's own default is `high`, so `max` can only come from the plugin | `session-0f47f1c6` / `session-b7f7a469`; final build re-checked (booted at `high`, edited to `max`) in `session-ce7ffac5` |
 
 **Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 
@@ -303,12 +332,14 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Floor / ceiling / clamp direction / prose-only pins | `tests/levels.spec.ts`, `tests/classify.spec.ts`, `tests/wiring.spec.ts` |
 | Clamping / no capabilities / no shared rung | via a fake `llm` service |
 | Steering raises only, continuation inherits, no cross-turn leakage | see `tests/state.spec.ts`, `tests/wiring.spec.ts` |
+| **The settings namespace** (registration options, no-provider fallback, user layer wins, reconfiguration on a committed change, gear dropped when disabled, an invalid commit keeps the running config) | the `settings namespace` group in `tests/wiring.spec.ts` (6 cases) against a fake provider implementing the `register`/`watch` contract |
 
 **Not verified on a real machine** (known gaps — do not treat as verified):
 
 - **A real subagent child** being skipped (`applyToSubagents: false`): in-process with a fake session header only.
 - **Non-DeepSeek providers** on the clamping path: fake `resolveModelInfo` only.
 - **Uninstalling the plugin while a session still selects Auto**: expected to fail loudly in-session with `UNSUPPORTED_REASONING_EFFORT` (`prepareCall` is deliberately unpatched), but never exercised for real.
+- **No GUI form for this plugin's settings**: the namespace is registered (it shows up in the read-only inventory under Settings → Plugins), but for now the `settings.yaml` section is edited by hand.
 
 Reproduce a real result:
 

@@ -7,14 +7,14 @@
 
 ## 0. 一句话现状
 
-插件 **v0.4.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
+插件 **v0.5.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
 分类有**两个后端**：默认纯启发式（零调用），`classifier: model` 时改用一次小模型调用（有超时、失败回落、pin 优先）。
-边界借鉴 oh-my-pi：**默认不低于 `low`、分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）、pin 只在正文匹配、钳制从下限一侧回答**（见 `docs/design.md` D13–D17）。
-已单测（116 个）、已真机验证（含真实 web profile 的 GUI 与模型分类的 A/B）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
+边界可配：**下限默认不设（可以到 `off`）**、**分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）**、pin 只在正文匹配、钳制从下限一侧回答（见 `docs/design.md` D13–D17）。
+已单测（117 个）、已真机验证（含真实 web profile 的 GUI、模型分类 A/B、下限两侧）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
-**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` 现在是 `deepseek-v4.1-flash-expires-on-0910` + **`reasoningEffort: high`**（用户在 GUI 里手动选了 High），所以**新会话现在走手动档**、插件不介入。想让新会话回到 Auto：在 GUI 里选一次 Auto（插件会把 effort 从落盘值里剥掉，见 D12），或删掉 settings.yaml 里那一行。
+**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。`web` profile 的 `cordis.patch.yml` 里有一条 `auto-thinking-effort` 覆盖行，把 `classifier` 设成 `model` + `deepseek-v4-flash`。
 ---
 
 ## 1. 这个项目要做什么
@@ -34,7 +34,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 |---|---|
 | GitHub | https://github.com/CooperZhuang/dsh-auto-thinking-effort （public） |
 | 本地 | `C:\CodeRepository\dsh-auto-thinking-effort` |
-| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.4.0`（**未发布**） |
+| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.5.0`（**未发布**） |
 | Node / pnpm | v24.16.0 / 12.3.4（`packageManager` 已钉） |
 | DSH 依赖 | **`0.1.2-rc.1`**（npm `next` dist-tag，不是 `latest`） |
 | DSH CLI | `C:\Users\Cooper\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` |
@@ -95,7 +95,8 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | **GUI：Auto → 每轮自动** | 选 Auto，发"谢谢" | `model/selection` 记 `reasoningEffort:"auto"`；请求头 `"off"` | `session-11eeae50` |
 | **GUI：手动档位不被覆盖** | 同会话改选 `Low`，发"深入思考一下：…"（本会判 max） | 请求头仍是 `"low"` —— **同一会话两条不同 header** | `session-11eeae50` |
 | **GUI：Auto 不污染全局默认** | 选 Auto 后看 `settings.yaml` | `agent-default-model` 无 `reasoningEffort` | `~/.dsh/settings.yaml` |
-| 真机：下限生效（v0.3） | `dsh --profile headless "git status"` | `"low"`（v0.2 是 `off`） | `session-4987185c` |
+| 真机：默认无下限（v0.5） | `dsh --profile headless "git status"`（真实 settings，Auto） | `"off"` | `session-3af16e67` |
+| 真机：下限可收紧（v0.3 行为） | 同一句话 + `autoFloorLevel: low` | `"low"` | `session-4987185c` |
 | 真机：pin 越过天花板（v0.3） | `dsh --profile headless "深入思考一下：…"` | `"max"` | `session-a82f0524` |
 | 真机：天花板挡住高分（v0.3） | 无 pin 的重负载长文本 | `"high"` | `session-771ee9b3` |
 | 真机：模型分类后端生效（v0.4） | 同一句话分别 `classifier: heuristic` / `classifier: model`（`deepseek-v4-flash`） | `high` → `low`（模型判断 trivial 并覆盖启发式） | `session-81e78e99` / `session-7de3b60c` |

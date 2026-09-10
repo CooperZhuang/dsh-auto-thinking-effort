@@ -64,9 +64,10 @@
         autoEffortId: auto
         autoEffortName: Auto
         autoEffortDescription: 每轮按提问自动选择档位
-        # Auto never turns thinking off: the weakest rung it may resolve to.
-        # Set this to `minimal` to let auto reach `off`.
-        autoFloorLevel: low
+        # Weakest rung auto may resolve to. `minimal` = the ladder's weakest
+        # level, i.e. no floor: auto may turn thinking off. Raise it to `low` if
+        # you would rather auto never switch thinking off.
+        autoFloorLevel: minimal
         # Score-derived decisions stay one rung below the top; only an explicit
         # pin (`ultrathink` / `深入思考`) reaches `max`.
         autoCeilingLevel: high

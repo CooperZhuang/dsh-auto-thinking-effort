@@ -92,18 +92,17 @@ The shipped ladder matches DeepSeek's four efforts (`off` / `low` / `high` / `ma
 
 | Level | Requested effort | Score band | Meaning |
 |---|---|---|---|
-| `minimal` | `off` | ≤ −6 | pleasantries, mechanical operations (**lifted to `low` by the default floor**) |
+| `minimal` | `off` | ≤ −6 | pleasantries, mechanical operations (**sends `off` by default**) |
 | `low` | `low` | −5 … −2 | simple, but worth a real sentence |
 | `high` | `high` | −1 … 11 | **default band**: ordinary questions, routine coding |
 | `max` | `max` | ≥ 12, or an explicit ask | many strong signals (**only reachable via a pin by default**) |
 
 A score of 0 (no signal at all) lands on `high`, deliberately: when guessing, thinking more is safer than thinking less.
 
-### Floor and ceiling (both ends are narrowed by default)
+### Floor and ceiling
 
-Borrowed from oh-my-pi: `auto` stays off both extremes.
-
-- **Floor `autoFloorLevel: low`** — `auto` never turns thinking off. Pleasantries and mechanical requests bottom out at `low`, not `off`. Set it to `minimal` to restore "auto may switch thinking off".
+One knob at each end:
+- **Floor `autoFloorLevel: minimal` (= no floor)** — a `minimal` decision really sends `off`: pleasantries and mechanical work such as `git status` turn thinking off. Set it to `low` (or any rung above the ladder minimum) to forbid that.
 - **Ceiling `autoCeilingLevel: high`** — a **score-derived** decision never exceeds `high`; only an **explicit pin** (`ultrathink` / `think hard` / `深入思考`) may reach `max`. A pin is the user speaking and is never capped.
 
 Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest` tokens (handy with a custom ladder).
@@ -192,7 +191,7 @@ Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest
 | `autoEffortName` | `Auto` | Label shown in the picker. |
 | `autoEffortDescription` | see above | One-line explanation shown in the picker. |
 | `autoWhenUnset` | `true` | Treat a request with no explicit effort as auto too. |
-| `autoFloorLevel` | `low` | Weakest level `auto` may resolve to; set it to the ladder's weakest rung to allow switching thinking off. |
+| `autoFloorLevel` | `minimal` | Weakest level `auto` may resolve to; the default is the ladder minimum (= thinking may be switched off). Set `low` to forbid that. |
 | `autoCeilingLevel` | `high` | Highest **score-derived** level; pins bypass it. |
 | `classifier` | `heuristic` | Which backend decides: `heuristic` (pure function) or `model` (one small-model call). |
 | `classifierModel` | `''` | Route for that call, `provider/model`; empty uses the session's own route. |
@@ -231,7 +230,7 @@ References: [`auto-thinking/classifier.ts`](https://github.com/can1357/oh-my-pi/
 |---|---|---|
 | Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | **configurable**: pure heuristics by default (zero calls); `classifier: model` makes it a small-model call too |
 | Where `auto` lives | an agent-local selector that is **never an Effort**, resolved before provider mapping | a synthetic gear injected into the model's rung list (DSH has no contribution hook) |
-| Floor | never below `low` | same by default (`autoFloorLevel`) |
+| Floor | never below `low` (hard-coded) | **no floor by default** (may reach `off`); set `autoFloorLevel: low` to forbid it |
 | Ceiling | default `xhigh` (one below top); only `ultrathink` reaches `max` | default `high`; only an explicit pin reaches `max` |
 | Clamping | highest pooled rung not exceeding the request | aligned (see above) |
 | Failure | throws → caller falls back to the provisional level and continues | no record → default band; never throws on the request path |
@@ -288,7 +287,8 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | **GUI: Auto → per turn** | select Auto, send "谢谢" | session `model/selection` records `reasoningEffort: "auto"`; request header `"off"` | `session-11eeae50` |
 | **GUI: manual gear not overridden** | same session, switch to `Low`, send "深入思考一下：…" (would classify as `max`) | header stays `"low"` — two different efforts in one live session | `session-11eeae50` |
 | **GUI: Auto does not pollute the default** | after selecting Auto, read `settings.yaml` | `agent-default-model` has **no** `reasoningEffort` | `~/.dsh/settings.yaml` |
-| Real run: floor applies | `dsh --profile headless "git status"` | `reasoningEffort: "low"` (no longer `off`) | `session-4987185c` |
+| Real run: no floor by default (v0.5) | `dsh --profile headless "git status"` (real settings, Auto) | `reasoningEffort: "off"` | `session-3af16e67` |
+| Real run: the floor can be raised | the same prompt with `autoFloorLevel: low` | `reasoningEffort: "low"` | `session-4987185c` |
 | Real run: pin crosses the ceiling | `dsh --profile headless "深入思考一下：…"` | `reasoningEffort: "max"` | `session-a82f0524` |
 | Real run: ceiling holds a heavy score back | long no-pin text (why+codebase+deadlock+analyze+prove+design+migration…) | `reasoningEffort: "high"` (score qualifies for `max`, ceiling blocks it) | `session-771ee9b3` |
 | Real run: the model backend decides | the same prompt (quote the first README paragraph) with `classifier: heuristic` vs `classifier: model` (`deepseek-v4-flash`) | heuristic `high` → model `low`: the model judged it trivial and overrode the heuristics | `session-81e78e99` / `session-7de3b60c` |

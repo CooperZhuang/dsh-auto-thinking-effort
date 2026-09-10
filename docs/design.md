@@ -167,13 +167,15 @@
 
 ---
 
-## D13 — 下限：`auto` 不把思考关掉
+## D13 — 下限：默认**不设**，`auto` 可以关掉思考
 
-**决定**：`autoFloorLevel` 默认 `low`。`auto` 判到 `minimal`（客套、机械操作）时，实际 effort 被抬到 `low`；把该值设成阶梯最弱那一档（或 `$weakest`）才允许到 `off`。
+**决定**：`autoFloorLevel` 默认是阶梯最弱那一档（`minimal`），也就是**没有下限**——`auto` 判到 `minimal`（客套、机械操作）时真的会发 `off`。想收紧就把 `autoFloorLevel` 设成 `low`（或更高的档位）。
 
-**理由**：参考 oh-my-pi 的 `clampAutoThinkingEffort`——它的注释写得很直接："`auto` never resolves below Low"。在编码场景里，"省下一点思考 token"换不回一次答错的代价；而"关掉思考"恰恰是用户最不可能想要的自动行为。
+**为什么和 oh-my-pi 不同**：他们的 `clampAutoThinkingEffort` 有硬下限（"`auto` never resolves below Low"），理由是"省下的 token 换不回一次答错"。我们第一版照抄了这条，但用户明确要求允许 `off`：在"客套 / `git status` 这类纯机械请求"上关掉思考是**这个插件最实际的省钱点**，而这类请求本来就不需要推理。所以策略改成**默认放开、可配置收紧**，`low` 下限仍然一条配置就能拿回来。
 
-**证据**：`src/levels.ts` 的 `resolveEffort` 的 `floor` 选项；`tests/levels.spec.ts` 的下限用例；真机 `dsh --profile headless "git status"` → `low`（`session-4987185c`，此前是 `off`）。
+**代价（明说）**：判定失误时可能把一轮本该思考的请求降到 `off`。防御手段是上限一侧（D14，只有 pin 到 `max`）与默认带（D3，无信号落 `high`）：`off` 只出现在**负分信号**明确命中的轮次。
+
+**证据**：`src/config.ts` 的 `autoFloorLevel` 默认值；`src/levels.ts` 的 `resolveEffort` `floor` 选项；`tests/levels.spec.ts`（下限开启/关闭两侧）、`tests/wiring.spec.ts`（"lets the lowest band turn thinking off by default" / "holds the lowest band at `low` when the floor is raised"）；真机 `dsh --profile headless "git status"` → `off`（`session-3af16e67`，加了下限时是 `low`）。
 
 ---
 

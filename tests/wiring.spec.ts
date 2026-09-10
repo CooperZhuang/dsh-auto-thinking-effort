@@ -163,7 +163,12 @@ function harness(options: HarnessOptions = {}): Harness {
 
   // A composition row plus, when asked for, a fake settings provider whose
   // resolved value starts at that same composition config (no user layer yet).
-  const composition = resolveConfig(options.config)
+  //
+  // These tests exercise the request wiring, not the classifier backend, so
+  // their baseline is the pure heuristic path: the model backend would answer
+  // from the fake route's scripted reply and mask what each case is measuring.
+  // The `model classifier` cases opt in by passing `classifier: 'model'`.
+  const composition = resolveConfig({ classifier: 'heuristic', ...options.config })
   const resolved = resolveConfig({ ...composition, ...options.settingsValue })
   const settings = options.settings === true ? fakeSettings(resolved) : undefined
   if (settings !== undefined) ctx.provide('settings', settings.registry)
@@ -502,7 +507,7 @@ describe('settings namespace', () => {
 
     // The same message, reclassified under a raised ceiling: the plugin must
     // read the new configuration without a reload or a restart.
-    h.settings?.push(resolveConfig({ autoCeilingLevel: 'max' }))
+    h.settings?.push(resolveConfig({ autoCeilingLevel: 'max', classifier: 'heuristic' }))
     await h.preStep(2, [userMessage(heavy)])
     expect((await h.request(2)).reasoningEffort).toBe('max')
   })

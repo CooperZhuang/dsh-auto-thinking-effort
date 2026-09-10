@@ -61,6 +61,12 @@ configure the same resolved value.
   an explicit `ultrathink`. The heuristic path (D1) stays pure, synchronous,
   deterministic and dependency-free: `classifier: heuristic` must keep working
   as the zero-call option, and the wiring tests keep it as their baseline.
+- **The classifier's own call must not think.** `classifierEffort` defaults to
+  `off` (D21): the call reads the request and answers one word, so it can never
+  be the most expensive thing in a turn. `''` means "the classifier route's
+  weakest declared rung"; a pinned value the route does not declare fails the
+  call, which is exactly D17's fallback. Do not "improve" this by letting the
+  classifier reason about its answer — that is what the classified turn is for.
 - **Never throw on the request path.** Every failure path returns the composed
   config unchanged — except a gear, which must be replaced or dropped.
 - **`g` / `y` regex flags are rejected** (`src/signals.ts`): a stateful

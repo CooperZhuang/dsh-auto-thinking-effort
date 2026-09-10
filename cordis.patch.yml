@@ -48,6 +48,27 @@
 # Only `reasoningEffort` is touched. Provider, model, prompt, and message list
 # are never modified, so a decision can at worst cost a different amount of
 # thinking, never a different conversation.
+#
+# ── Configuring it ──────────────────────────────────────────────────────────
+#
+# The `config:` block below is the **composition base layer**. The plugin also
+# registers a settings namespace with the same name, so the knobs can be set in
+# a settings file instead:
+#
+#   # ~/.dsh/settings.yaml
+#   auto-thinking-effort:
+#     autoCeilingLevel: max
+#     classifier: model
+#     classifierModel: deepseek-official/deepseek-v4-flash
+#
+# Resolution order is schema defaults → this base layer → the settings user
+# layer, and the namespace is registered with `applies: live`: an edit there is
+# picked up on the running host (watch + re-validate), with a log line reading
+# `reconfigured from auto-thinking-effort — …`. An invalid edit keeps the last
+# good configuration and warns instead of stranding the session. A profile row
+# override replaces this whole `config:` block, so put user preferences in the
+# settings file rather than restating every key in the profile patch.
+# thinking, never a different conversation.
 - insert:
     - id: auto-thinking-effort
       name: 'dsh-auto-thinking-effort'

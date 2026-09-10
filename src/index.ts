@@ -97,46 +97,139 @@ interface PendingClassification {
   readonly text: string
   promise?: Promise<ClassifierAnswer | undefined>
 }
-
 /** Context `supportedEfforts` needs; a full {@link RequestContext} satisfies it. */
 type CapabilityContext = Pick<RequestContext, 'ctx' | 'config' | 'capabilities' | 'logger'>
 
 /**
+ * Settings namespace this plugin owns. The composition row in `cordis.patch.yml`
+ * is the **base** layer; the user layer lives in `settings.yaml` under this key,
+ * so programmatic writes and hand edits land in the same documented place.
+ */
+export const SETTINGS_NAMESPACE = 'auto-thinking-effort'
+
+/**
+ * The slice of `ctx.settings` this plugin uses, declared structurally on
+ * purpose: the plugin works without a settings provider (it then runs on the
+ * composition row alone), so `@deepseek-ai/dsh-settings` is not a peer.
+ * Mirrors `SettingsProvider.register` and `SettingsScope` — see
+ * `dsh-settings/lib/types/index.d.ts:206` and `:84-113`.
+ */
+interface SettingsScope {
+  /** Resolved value: schema defaults, then the composition base, then the user layer. */
+  get(): ConfigShape
+  /** Observe committed changes to the resolved value. */
+  watch(callback: (next: ConfigShape, previous: ConfigShape) => void | Promise<void>): () => void
+}
+interface SettingsRegistry {
+  register(namespace: string, schema: unknown, options: {
+    base?: Partial<ConfigShape>
+    applies?: 'live' | 'restart'
+    validate?: (value: ConfigShape) => void
+  }): SettingsScope
+}
+
+/** One resolved configuration plus everything derived from it. */
+interface Runtime {
+  readonly config: ConfigShape
+  readonly prepared: PreparedConfig
+  readonly gear: AutoGear
+}
+
+/**
  * Install the plugin's listeners and the synthetic gear.
+ *
+ * The configuration is resolved through a settings namespace when the
+ * deployment mounts one: the composition row is the base layer and
+ * `settings.yaml` the user layer, so a change there reconfigures the running
+ * host without reloading the plugin row.
+ *
  * @param ctx - plugin context; every registration is disposed with it.
- * @param config - validated plugin configuration.
+ * @param config - the composition row's configuration (the settings base layer).
  * @throws when the configuration is invalid (fail loud at load time).
  */
 export function apply(ctx: Context, config: ConfigShape): void {
-  const prepared = prepareConfig(config)
   const logger = ctx.logger(name)
-  const gear: AutoGear = {
-    id: config.autoEffortId,
-    name: config.autoEffortName,
-    description: config.autoEffortDescription,
-  }
+  // The composition row alone must already be valid: a mount that cannot run is
+  // a configuration bug, and stopping the plugin tree is the loud answer.
+  let runtime = buildRuntime(config)
 
   const states = new Map<string, AgentState>()
   const classifications = new Map<string, PendingClassification>()
   const classifierCache = new Map<string, string>()
   const capabilities = new Map<string, Promise<string[] | undefined>>()
-  const warned = new Set<string>()
+  let warned = new Set<string>()
 
-  // The gear is advertised only while the plugin is on; the sanitizer below
-  // stays registered either way so a session that still selects Auto after the
+  // The gear is advertised only while the plugin is on; the listeners below
+  // stay registered either way so a session that still selects Auto after the
   // plugin was disabled cannot send that id to a provider.
-  if (config.enabled) {
-    ctx.effect(() => installAutoGear(ctx, gear), 'auto-thinking-effort: Auto gear')
-    ctx.on('llm/adapters-updated', () => {
-      // A late-mounting or hot-reloaded LLM service gets the gear too.
-      installAutoGear(ctx, gear)
-    })
+  let disposeGear: (() => void) | undefined
+  const syncGear = (): void => {
+    disposeGear?.()
+    disposeGear = undefined
+    if (!runtime.config.enabled) return
+    disposeGear = installAutoGear(ctx, runtime.gear)
   }
+  ctx.effect(() => () => { disposeGear?.() }, 'auto-thinking-effort: Auto gear')
+  ctx.on('llm/adapters-updated', () => {
+    // A late-mounting or hot-reloaded LLM service gets the gear too.
+    syncGear()
+  })
+  syncGear()
+
+  // The namespace is registered through `ctx.inject` rather than a plain
+  // `ctx.get`: a service is only readable once its providing fiber is active,
+  // and the settings provider loads its document asynchronously. The callback
+  // runs when the service appears, is torn down and re-run when it is replaced,
+  // and never fires in a deployment that mounts no provider — where the plugin
+  // then runs on the composition row alone.
+  ctx.inject(['settings'], (settingsCtx) => {
+    const settings = settingsCtx.get('settings') as unknown as SettingsRegistry | undefined
+    if (settings === undefined) return
+    const scope = settings.register(SETTINGS_NAMESPACE, Config, {
+      base: config,
+      applies: 'live',
+      // Cross-field rules the schema cannot express (bounds must name levels,
+      // the floor must not rank above the ceiling) are refused at the write
+      // site, so a hand edit fails loud instead of stranding the session.
+      validate: (value) => { prepareConfig(value) },
+    })
+    /** Whether a configuration from this namespace is already in effect. */
+    let configured = false
+
+    const adopt = (next: ConfigShape, origin: string): void => {
+      let built: Runtime
+      try {
+        built = buildRuntime(next)
+      } catch (error) {
+        logger.warn('configuration rejected, keeping the running one: %s', String(error))
+        return
+      }
+      const gearChanged = built.gear.id !== runtime.gear.id
+        || built.gear.name !== runtime.gear.name
+        || built.gear.description !== runtime.gear.description
+      const wasEnabled = runtime.config.enabled
+      runtime = built
+      // Everything derived from the previous configuration is now stale.
+      warned = new Set<string>()
+      capabilities.clear()
+      classifierCache.clear()
+      if (gearChanged || wasEnabled !== built.config.enabled) syncGear()
+      // The first adoption is the namespace coming into effect; every later one
+      // replaces a configuration that was already running.
+      logger.info(configured ? 'reconfigured from %s — %s' : 'configured from %s — %s', origin, describeRuntime(runtime))
+      configured = true
+    }
+
+    // The resolved value already includes the composition base, so the first
+    // adoption and every later edit share one path.
+    adopt(scope.get(), SETTINGS_NAMESPACE)
+    scope.watch((next) => { adopt(next, SETTINGS_NAMESPACE) })
+  })
 
   const stateFor = (agent: Agent): AgentState => {
     const existing = states.get(agent.id)
     if (existing !== undefined) return existing
-    const created = new AgentState(prepared.levels)
+    const created = new AgentState(runtime.prepared.levels)
     states.set(agent.id, created)
     return created
   }
@@ -153,23 +246,23 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    if (!config.enabled) return decision
+    if (!runtime.config.enabled) return decision
     // A subagent's route and effort belong to whoever spawned it: do not even
     // classify. Its gear (if one was inherited) is still resolved below.
-    if (!config.applyToSubagents && payload.agent.session.header.origin === 'subagent') return decision
+    if (!runtime.config.applyToSubagents && payload.agent.session.header.origin === 'subagent') return decision
     try {
       const agent = payload.agent
       const state = stateFor(agent)
-      const text = observeTurn(config, prepared, state, payload.turn, payload.messages)
+      const text = observeTurn(runtime.config, runtime.prepared, state, payload.turn, payload.messages)
       // Start the model classifier now so its latency overlaps prompt assembly;
       // `agent/request` awaits the very same promise. A pinned turn is the user
       // speaking and needs no second opinion.
-      if (text !== undefined && config.classifier === 'model' && state.forTurn(payload.turn)?.pinned !== true) {
+      if (text !== undefined && runtime.config.classifier === 'model' && state.forTurn(payload.turn)?.pinned !== true) {
         const pending: PendingClassification = { turn: payload.turn, text }
         pending.promise = startClassification({
           ctx,
-          config,
-          prepared,
+          config: runtime.config,
+          prepared: runtime.prepared,
           logger,
           agent,
           cache: classifierCache,
@@ -178,7 +271,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           turn: payload.turn,
           text,
           signal: payload.signal,
-          route: configuredClassifierRoute(config, agent),
+          route: configuredClassifierRoute(runtime.config, agent),
         })
         classifications.set(agent.id, pending)
       }
@@ -193,13 +286,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ctx.on('agent/request', async (payload, next) => {
     const resolved = await next()
     try {
-      const gearRequested = requestsAutoGear(resolved, config.autoEffortId)
+      const gearRequested = requestsAutoGear(resolved, runtime.config.autoEffortId)
       const subagent = payload.agent.session.header.origin === 'subagent'
-      if (subagent && !config.applyToSubagents && !gearRequested) return resolved
+      if (subagent && !runtime.config.applyToSubagents && !gearRequested) return resolved
       return await decideEffort({
         ctx,
-        config,
-        prepared,
+        config: runtime.config,
+        prepared: runtime.prepared,
         state: stateFor(payload.agent),
         agent: payload.agent,
         pending: classifications,
@@ -217,21 +310,40 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }
   }, { prepend: true })
 
-  if (config.enabled) {
-    logger.info(
-      'enabled — gear %s, %d level(s) [%s], %d rule(s), classifier=%s%s, dryRun=%s, subagents=%s',
-      config.autoEffortId,
-      prepared.levels.length,
-      prepared.levels.map((level) => `${level.id}→${level.effort}`).join(' '),
-      prepared.rules.length,
-      config.classifier,
-      config.classifier === 'model' && config.classifierModel.trim() !== '' ? ` (${config.classifierModel})` : '',
-      String(config.dryRun),
-      config.applyToSubagents ? 'on' : 'off',
-    )
-  } else {
-    logger.info('disabled — only the %s sanitizer is active', config.autoEffortId)
+  logger.info(
+    runtime.config.enabled ? 'enabled — %s' : 'disabled — only the %s sanitizer is active',
+    runtime.config.enabled ? describeRuntime(runtime) : runtime.config.autoEffortId,
+  )
+}
+
+/**
+ * Validate one configuration and derive everything the plugin needs from it.
+ * @param config - a resolved configuration (composition base plus user layer).
+ * @returns the runtime state.
+ * @throws when the configuration is invalid; callers on the settings path keep
+ * the previous runtime instead of failing the turn.
+ */
+function buildRuntime(config: ConfigShape): Runtime {
+  return {
+    config,
+    prepared: prepareConfig(config),
+    gear: { id: config.autoEffortId, name: config.autoEffortName, description: config.autoEffortDescription },
   }
+}
+
+/**
+ * Render one configuration for the startup and reconfigure log lines.
+ * @param runtime - the runtime state to describe.
+ * @returns a one-line summary.
+ */
+function describeRuntime(runtime: Runtime): string {
+  const { config, prepared } = runtime
+  const classifier = config.classifier === 'model'
+    ? `model${config.classifierModel.trim() === '' ? '' : ` (${config.classifierModel})`}`
+    : 'heuristic'
+  return `gear ${config.autoEffortId}, levels [${prepared.levels.map((level) => `${level.id}→${level.effort}`).join(' ')}], `
+    + `${String(prepared.rules.length)} rule(s), bounds ${prepared.floor.id}..${prepared.ceiling.id}, `
+    + `classifier=${classifier}, dryRun=${String(config.dryRun)}, subagents=${config.applyToSubagents ? 'on' : 'off'}`
 }
 
 /**

@@ -235,12 +235,11 @@ Details:
 
 ### Configuration in the GUI: 自动思考强度
 
-The package ships its own browser half (`src/client.js` → `lib/client.js`) and contributes two surfaces:
+The package ships its own browser half (`src/client.js` → `lib/client.js`), which contributes exactly one surface: **Settings → 自动思考强度** — its own page in the settings navigation, right after 模型 and before 插件. It binds this plugin's settings-namespace scope, so the page, `settings.yaml`, and the composition row are always one resolved value.
 
-- **Settings → 自动思考强度** — its own page in the settings navigation, right after 模型;
-- a card in **Settings → Plugins → Plugin configuration**, keyed by its own settings namespace (the section only pairs a served namespace with the card registered under that same key).
+> The Plugins section no longer shows a card for this plugin: once there is a page of its own, a second copy of the same form in the plugin list only creates doubt. The namespace itself stays registered — that is the half that decides where configuration lives and how it applies live.
 
-Both bind one namespace scope, so they can never disagree. Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
+Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
 
 - `classifierModel` is a **dropdown** fed by the host's model catalog (`remote.session.modelCatalog` — the same list the composer's model picker shows), so "the models you already configured" means the same thing in both places; an extra entry means "follow the session's own route". When the catalog is unavailable the field degrades to free text and says why.
 - Drafts stay in the form until **save**, which writes one atomic mutation fenced at the revision the draft started from — a concurrent editor is refused, never silently overwritten.
@@ -344,6 +343,7 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | **Real run: the `classifierModel` dropdown** | same process, field expanded | options are the host catalog's configured models (`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp`) plus “follow the session model”; picking one and saving wrote `classifierModel: deepseek-official/deepseek-v4-flash` | the same scratch settings file |
 | **Real run: a form save reaches the host** | in that same process the form set `autoFloorLevel: low` and saved; a new session then sent `git status` | `settings.yaml` gained the value and that turn's `request/header` was `"low"` (the profile row alone gives `"off"` for that prompt) | `session-b340648b` |
 | **Real run: reset clears an override** | the field's “reset” was clicked and saved | the `autoFloorLevel` line disappeared from `settings.yaml` (the field re-inherited `minimal`) | the same scratch settings file |
+| **Real run: no duplicate in the plugin list** | same process, Settings → Plugins → Plugin configuration opened | only the shipped cards remain (插件市场 / 终端 …); this plugin exists solely as its own page | the same process |
 
 **Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 

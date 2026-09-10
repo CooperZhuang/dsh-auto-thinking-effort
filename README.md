@@ -239,14 +239,13 @@ auto-thinking-effort:
 - 插件**不依赖** `@deepseek-ai/dsh-settings`（接口是按结构声明的，见 `src/index.ts`）：没挂 settings provider 时它就只用 profile 那一行配置，照常工作。
 - 命名空间通过 `ctx.inject(['settings'])` 注册（服务要等提供它的 fiber 起来才读得到），所以 provider 晚于本插件挂载也没问题。
 
-### GUI：设置里的一页配置（自动思考强度）
+### GUI：设置里的独立一页（自动思考强度）
 
-包自带浏览器半边（`src/client.js` → `lib/client.js`），提供两个入口：
+包自带浏览器半边（`src/client.js` → `lib/client.js`），只提供一个入口：**设置 → 自动思考强度**（左侧导航里独立的一项，排在「模型」之后、「插件」之前）。它绑定本插件的 settings 命名空间 scope，所以这一页、`settings.yaml`、profile 里的组装值永远是同一份解析结果。
 
-- **设置 → 自动思考强度**（左侧导航里独立的一项，排在「模型」后面）——一页完整的配置表单；
-- **设置 → 插件 → 插件配置**里的一张卡片（同一个表单，key 就是本插件的 settings 命名空间，分区只负责把被服务的命名空间与同名卡片配对）。
+> 「设置 → 插件 → 插件配置」里**不再**出现本插件的卡片：既然有了独立的一页，插件列表里再放一份同样的表单只会让人困惑。（命名空间本身仍然注册着——它才是「配置存在哪、怎么热生效」的那一半。）
 
-两个入口绑定同一个命名空间 scope，所以永远一致。表单的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
+表单的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
 
 - `classifierModel` 是**下拉框**，选项来自 host 的模型目录（`remote.session.modelCatalog`，和输入框旁边那个模型选择器同一份数据），所以「已配置好的模型」在两处含义一致；多出一个「（跟随会话模型）」= 不额外指定路线。模型目录拿不到时会自动退回可手填 `provider/model` 的文本框（并在下面说明原因）。
 - 草稿先暂存在表单里，**保存**才写入；写入是一次原子 mutation，并用草稿开始时的 revision 设栅，别的界面并发改过就拒绕而不是静默覆盖。
@@ -350,6 +349,7 @@ auto-thinking-effort:
 | **真机：`classifierModel` 下拉** | 同一进程，展开该字段 | 选项 = host 模型目录里的已配置模型（`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp`）+「（跟随会话模型）」；选中一个保存后 `settings.yaml` 写入 `classifierModel: deepseek-official/deepseek-v4-flash` | 同一 scratch 设置文件 |
 | **真机：表单保存 → host 采纳** | 同一进程内把 `autoFloorLevel` 改成 `low` 并保存，然后新会话发 `git status` | `settings.yaml` 写入成功；该轮 `request/header` = `"low"`（base 行单独跑同句是 `"off"`） | `session-b340648b` |
 | **真机：重置 = 清除覆盖** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 `minimal`） | 同一 scratch 设置文件 |
+| **真机：插件列表里不再重复出现** | 同一进程打开「设置 → 插件 → 插件配置」 | 只剩官方卡片（插件市场 / 终端 …），本插件只以左侧独立一页存在 | 同一进程 |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 

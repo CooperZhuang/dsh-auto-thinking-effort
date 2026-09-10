@@ -265,26 +265,29 @@
 
 ---
 
-## D19 — 浏览器半边：一张由本插件自己拥有的配置卡片
+## D19 — 浏览器半边：设置里由本插件自己拥有的一页
 
-**决定**：包自己提供浏览器半边（`src/client.js` → `lib/client.js`，`package.json` 声明 `dsh.client`），往 `settings.plugin.item` 槽里以「自己的 settings 命名空间」为 key 注册一张配置卡片。
+**决定**：包自己提供浏览器半边（`src/client.js` → `lib/client.js`，`package.json` 声明 `dsh.client`），往 `settings.section` 槽里注册**本插件自己的一页设置**：id `auto-thinking-effort`、label「自动思考强度」、`order: 12`（排在「模型」10 与「插件」15 之间）。**不再**向 `settings.plugin.item` 注册卡片——见下面「为什么最终只留一页」。
 
-**为什么必须自己提供**：「插件」设置分区只把**被服务的命名空间**与**注册在同一 key 上的卡片**配对——「被服务却无人认领的命名空间什么都不渲染」（`dsh-client-ui-settings-plugins/README.zh.md`）。D18 只让命名空间进了「插件列表」的只读清单，所以用户在 GUI 里看不到任何可编辑入口。而官方文档明确这本就是给外部插件留的口子：“Keying on the namespace is what lets a plugin distributed outside this repository contribute a card”（`slot-contract.d.ts`）。
+**为什么必须自己提供**：D18 只让命名空间进了「插件列表」的只读清单，GUI 里没有任何可编辑入口。DSH 的槽位体系给外部插件留了两条路：`settings.section`（自己的设置页）与 `settings.plugin.item`（「插件」分区里以命名空间为 key 的卡片）。两条都要求包自带浏览器半边，因为浏览器半边只能由包自己交付。
 
-**为什么手写而不是构建**：浏览器半边必须以 **client bundle**（经典脚本 + `window.__ModuleLoader__.load({id, factory})` 的惰性 CJS factory）形式交付，而产出该形状的 `tsdown.client.ts` 预设位于 DSH 仓库内部、不是已发布的包（官方 README 把这列为已知限制：“仓库之外的插件得自行复刻该构建”）。与其复刻一份会腐烂的预设，不如直接写那个形状：没有打包器、没有 externals（React 与槽服务由外壳播种）、整个浏览器半边是一个可审阅的文件。代价：**它不被 `tsc` 检查**（`eslint` 仍看它，`scripts/build-client.mjs` 在构建时校验 id 与 bundle 形状）；这是本仓库唯一没有类型的源码文件。
+**为什么手写而不是构建**：浏览器半边必须以 **client bundle**（经典脚本 + `window.__ModuleLoader__.load({id, factory})` 的惰性 CJS factory）形式交付，而产出该形状的 `tsdown.client.ts` 预设位于 DSH 仓库内部、不是已发布的包（官方 README 把这列为已知限制：“仓库之外的插件得自行复刻该构建”）。与其复刻一份会腐烂的预设，不如直接写那个形状：没有打包器、没有 externals（React、`dsh-client-ui-slots` 等由外壳的静态模块表播种）、整个浏览器半边是一个可审阅的文件。代价：**它不被 `tsc` 检查**（`eslint` 仍看它，`scripts/build-client.mjs` 在构建时校验 id 与 bundle 形状）；这是本仓库唯一没有类型的源码文件。
 
-**卡片做什么**：绑定 `ctx.settingsScope.bind({ namespace: 'auto-thinking-effort' })`，渲染 13 个字段（开关/下拉/数字），暂存草稿、逐字段「已覆盖」徒标与重置，保存时把全部草稿当作**一次** `mutate`（带草稿开始时的 revision 围栏），留空即 `unset`（重新继承 base）。**不**渲染 `levels`/`rules` 这类结构化配置，而是在卡片里指向 `settings.yaml`。
+**为什么最终只留一页**：第一版走的是 `settings.plugin.item` 卡片（当时以为那是唯一入口，也确实是官方文档里给外部插件留的口子）。真机上用户指出两件事：① 他要的是**设置左侧的独立一项**，插件列表里那张卡片找不到；② 一旦有了独立一页，插件列表里再放同一份表单就是重复。于是改为只注册 `settings.section`。这条取舍的实质是：**卡片是「插件的配置放在插件那一栏」的惯例，而页是「设置里应该有这一项」的预期**；对以「档位」为主语的设置来说，后者才是用户找的地方。
 
-**边界**：命名空间不可用（`status !== 'ready'`）时卡片什么都不渲染（官方 PluginCard 的约定）；`writable: false`（memory 模式）时控件全部禁用；写入被 revision 拒绝时保留草稿并把错误显示在卡片里（不静默丢弃）。
+**这一页做什么**：绑定 `ctx.settingsScope.bind({ namespace: 'auto-thinking-effort' })`，渲染 13 个字段（开关/下拉/数字），暂存草稿、逐字段「已覆盖」徒标与重置，保存时把全部草稿当作**一次** `mutate`（带草稿开始时的 revision 围栏），留空即 `unset`（重新继承 base）。**不**渲染 `levels`/`rules` 这类结构化配置，而是在页面里指向 `settings.yaml`。
+
+**边界**：命名空间还没就绪时页面渲染一行说明（`loading` / `unavailable`）而**不是**空白——导航项已经在那儿了，一页空白比一行解释更糟；`writable: false`（memory 模式）时控件全部禁用；写入被 revision 拒绝时保留草稿并把错误显示在页面里（不静默丢弃）。
 
 **真机验证**（DSH 0.1.2-rc.1 / 全新 `dsh --profile web --port 0` 进程）：
 
 | 场景 | 结果 |
 |---|---|
-| 卡片出现在「设置 → 插件 → 插件配置」 | 与官方卡片（插件市场/终端…）并列；展开后 13 个字段、base 值与「已覆盖」标记都对 |
+| 「自动思考强度」出现在设置左侧导航 | 排在「模型」之后、「插件」之前；点开是完整表单（13 个字段、base 值与「已覆盖」标记都对） |
 | 保存写入 Host 文档 | 选 `autoCeilingLevel: high` → 保存 → scratch `settings.yaml` 里该段变成 `high`，注释与其它段未动 |
-| **GUI 写入被运行中的 host 采纳** | 同一进程内用卡片把 `autoFloorLevel` 改成 `low` → 新会话发 `git status` → 请求头 `"low"`（base 行单独跑同句是 `"off"`） |
+| **GUI 写入被运行中的 host 采纳** | 同一进程内用页面把 `autoFloorLevel` 改成 `low` → 新会话发 `git status` → 请求头 `"low"`（base 行单独跑同句是 `"off"`） |
 | 重置 = 清除覆盖 | 点该字段的「重置」→ 保存 → `settings.yaml` 里 `autoFloorLevel` 一行消失（回到继承 base 的 `minimal`） |
+| 插件列表里不再重复出现 | 「设置 → 插件 → 插件配置」只剩官方卡片（插件市场 / 终端 …）；本插件只以左侧独立一页存在 |
 
 **证据**：`src/client.js`、`scripts/build-client.mjs`、`package.json`（`dsh.client` + `exports['./client']` + `files`）、`eslint.config.js`（浏览器全局 + `sourceType: 'script'`）；session `session-b340648b`（GUI 写入后的 `git status` 轮次）。
 
@@ -294,13 +297,13 @@
 
 **决定**（v0.6 定稿，三条都是用户明确要求的）：
 
-1. 浏览器半边除了「插件 → 插件配置」里的卡片，还向 `settings.section` 注册**一页自己的设置**，label「自动思考强度」、`order: 12`（排在「模型」10 与「插件」15 之间）——用户找档位设置时看的是左侧菜单，不是插件列表。
+1. 浏览器半边向 `settings.section` 注册**一页自己的设置**，label「自动思考强度」、`order: 12`（排在「模型」10 与「插件」15 之间）——用户找档位设置时看的是左侧菜单，不是插件列表；**并且不再向 `settings.plugin.item` 注册卡片**（同一份表单只留一处，见 D19「为什么最终只留一页」）。
 2. `classifierModel` 从自由文本改成**下拉框**，选项来自 Host 的模型目录（`remote.session.modelCatalog`，即输入框旁那个模型选择器同一份数据），外加一个空值项「（跟随会话模型）」。
 3. 出厂默认就是推荐配置：**`classifier: model`**（schema 默认 + bundle 行的 base 层都改），其余策略保持 D13/D14（下限不设、分数不超过 `high`）。
 
 **为什么**：
 
-- 卡片是「插件的配置放在插件那一栏」的惯例，但**不是**用户找设置的地方；独立一页才符合「设置里应该有这一项」的预期。两者共用同一个表单组件与同一个命名空间 scope，所以可以并存、永远不会不一致。
+- 卡片是「插件的配置放在插件那一栏」的惯例，但**不是**用户找设置的地方；独立一页才符合「设置里应该有这一项」的预期。既然有了这一页，插件列表里就不再放同一份表单（D19）。
 - 「已配置好的模型」在 DSH 里只有一个权威答案：模型目录。让用户手敲 `provider/model` 既容易打错，也和旁边的模型选择器说法不一致。目录拿不到时降级成文本框（并把原因写在字段下面），所以没有 remotes 的部署仍可用。
 - 分类质量的主要来源是「读懂提问」而不是「读懂提问的形状」；`model` 只回一个词、有硬超时、任何失败回落启发式，代价可控。想零调用就一行切回 `heuristic`（D1 那条路仍在，只是不再默认）。
 
@@ -318,6 +321,7 @@
 | 页面 | 渲染完整表单；`classifier` 默认选中 `model（一次小模型调用）` |
 | 模型下拉 | 选项 = 目录里的 `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp` +「（跟随会话模型）」 |
 | 保存 | 选中 `deepseek-official/deepseek-v4-flash` 保存 → `settings.yaml` 里出现该键；`autoFloorLevel: low` 同样写回 |
+| 插件列表 | 「设置 → 插件 → 插件配置」里只剩官方卡片，本插件不再出现（用户真实 `web` profile 上复核过） |
 
 **证据**：`src/client.js`（`SECTION_TITLE`、`createCatalog`、`ctx.inject(['remote','remote.session'])`）、`src/config.ts`（`classifier` 默认）、`cordis.patch.yml`、`tests/config.spec.ts`、`tests/wiring.spec.ts`（harness 基线改成 heuristic，模型后端用例显式 opt-in）。
 

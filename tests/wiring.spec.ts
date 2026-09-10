@@ -20,11 +20,11 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 import type { ConfigShape } from '../src/config.ts'
-import { apply } from '../src/index.ts'
+import { DEFAULT_LEVELS } from '../src/levels.ts'
+import { apply, SETTINGS_NAMESPACE } from '../src/index.ts'
 
 const GEAR = 'auto'
 
-/** A fake route declaring `efforts`, or no reasoning capability at all when `null`. */
 /**
  * A fake route. `classifierAnswer` makes the fake answer the optional model
  * classifier; `null` makes that call fail with a terminal error finish.
@@ -83,6 +83,49 @@ interface HarnessOptions {
   selectedEffort?: string | undefined
   /** What the fake classifier model answers; `null` makes that call fail. */
   classifierAnswer?: string | null
+  /** Mount a fake `ctx.settings` provider (default none). */
+  settings?: boolean
+    /** What that provider resolves to; defaults to the composition row. */
+    settingsValue?: Partial<ConfigShape>
+}
+
+/** A fake settings provider recording one namespace registration. */
+interface FakeSettings {
+  readonly registry: unknown
+  readonly registrations: { namespace: string; options: Record<string, unknown> }[]
+  /** Commit a new resolved value, exactly as a settings write would. */
+  push(next: ConfigShape): void
+}
+
+/**
+ * Build a fake settings provider.
+ * @param initial - the resolved value before any user layer exists.
+ * @returns the registry, its registrations, and a way to commit a new value.
+ */
+function fakeSettings(initial: ConfigShape): FakeSettings {
+  const registrations: { namespace: string; options: Record<string, unknown> }[] = []
+  const watchers: ((next: ConfigShape, previous: ConfigShape) => void)[] = []
+  let value = initial
+  return {
+    registrations,
+    registry: {
+      register(namespace: string, _schema: unknown, options: Record<string, unknown>) {
+        registrations.push({ namespace, options })
+        return {
+          get: () => value,
+          watch: (callback: (next: ConfigShape, previous: ConfigShape) => void) => {
+            watchers.push(callback)
+            return () => {}
+          },
+        }
+      },
+    },
+    push(next: ConfigShape) {
+      const previous = value
+      value = next
+      for (const watcher of watchers) watcher(next, previous)
+    },
+  }
 }
 
 interface Harness {
@@ -92,6 +135,16 @@ interface Harness {
   classifierCalls(): number
   /** The system prompt of the last classifier call. */
   classifierPrompt(): string
+  /** The synthetic gear the fake route advertises right now, if any. */
+  gear(): Promise<string | undefined>
+  /**
+   * Let the plugin's deferred work land. The settings namespace is registered
+   * from an `inject` callback — a service is only readable once its providing
+   * fiber is active — so it is not registered synchronously with `apply`.
+   */
+  settle(): Promise<void>
+  /** The fake settings provider, when the harness mounted one. */
+  settings: FakeSettings | undefined
 }
 
 /**
@@ -107,6 +160,13 @@ function harness(options: HarnessOptions = {}): Harness {
     options.classifierAnswer === undefined ? 'high' : options.classifierAnswer,
   )
   ctx.provide('llm', llm)
+
+  // A composition row plus, when asked for, a fake settings provider whose
+  // resolved value starts at that same composition config (no user layer yet).
+  const composition = resolveConfig(options.config)
+  const resolved = resolveConfig({ ...composition, ...options.settingsValue })
+  const settings = options.settings === true ? fakeSettings(resolved) : undefined
+  if (settings !== undefined) ctx.provide('settings', settings.registry)
 
   const agent = {
     id: 'session-1',
@@ -134,24 +194,37 @@ function harness(options: HarnessOptions = {}): Harness {
     selection.assembled = selection.current
   }
 
-  apply(ctx, resolveConfig(options.config))
+  apply(ctx, composition)
+
+  // One macrotask lets cordis finish loading the fiber that carries the
+  // settings `inject` callback; every async entry point waits for it first.
+  const settled = new Promise<void>((resolve) => { setTimeout(resolve, 0) })
 
   const target = agent as unknown as Agent
   const dispatch = agentEvents(ctx, target)
   const signal = new AbortController().signal
 
   return {
+    settle: () => settled,
     async preStep(turn, messages, step = 1) {
+      await settled
       await dispatch.waterfall('agent/pre-step', { messages: [...messages], turn, step, signal }, () => Promise.resolve({
         kind: 'enter' as const,
         messages: [...messages],
       }))
     },
     async request(turn, step = 1, seed = { provider: 'fake', model: 'fake-1', reasoningEffort: ReasoningEffortId(GEAR) }) {
+      await settled
       return await dispatch.waterfall('agent/request', { turn, step, signal }, () => Promise.resolve(seed))
     },
     classifierCalls: () => (llm as unknown as { calls: { classifier: number } }).calls.classifier,
     classifierPrompt: () => (llm as unknown as { calls: { lastSystem: string } }).calls.lastSystem,
+    async gear() {
+      await settled
+      const info = await llm.resolveModelInfo('fake', 'fake-1')
+      return info.reasoning?.efforts.map((effort) => String(effort.id)).find((id) => id === GEAR)
+    },
+    settings,
   }
 }
 
@@ -380,5 +453,76 @@ describe('turn state', () => {
     const h = harness({ selectedEffort: 'low', config: { enabled: false } })
     await h.preStep(1, [userMessage('think hard')])
     expect((await h.request(1)).reasoningEffort).toBe('low')
+  })
+})
+
+describe('settings namespace', () => {
+  it('registers the namespace on the composition row, applied live', async () => {
+    const h = harness({ settings: true, config: { classifier: 'model' }, selectedEffort: GEAR })
+    await h.settle()
+    expect(h.settings?.registrations).toHaveLength(1)
+    const [registration] = h.settings?.registrations ?? []
+    expect(registration?.namespace).toBe(SETTINGS_NAMESPACE)
+    expect(registration?.options.base).toMatchObject({ classifier: 'model' })
+    expect(registration?.options.applies).toBe('live')
+  })
+
+  it('uses the composition row when no settings provider is mounted', async () => {
+    const h = harness({ config: { classifier: 'model' }, selectedEffort: GEAR })
+    expect(h.settings).toBeUndefined()
+    await h.preStep(1, [userMessage('Add a retry to the upload helper')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('lets the resolved value override the composition row at load time', async () => {
+    // The composition row ships `max → max`; the user layer renames that rung,
+    // so a pin landing on `max` must ask the adapter for `maximum`.
+    const h = harness({
+      efforts: ['off', 'low', 'high', 'max', 'maximum'],
+      selectedEffort: GEAR,
+      settings: true,
+      settingsValue: {
+        levels: DEFAULT_LEVELS.map((level) => ({
+          ...level,
+          ...level.id === 'max' ? { effort: 'maximum' } : {},
+        })),
+      },
+    })
+    await h.preStep(1, [userMessage('think hard about the deadlock')])
+    expect((await h.request(1)).reasoningEffort).toBe('maximum')
+  })
+
+  it('reconfigures the running plugin on a committed change', async () => {
+    const h = harness({ settings: true, selectedEffort: GEAR })
+    // Heavy, unpinned: the score reaches the top level, but ships capped at
+    // the default ceiling.
+    const heavy = 'why does the whole codebase deadlock? prove the invariant.'
+    await h.preStep(1, [userMessage(heavy)])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+
+    // The same message, reclassified under a raised ceiling: the plugin must
+    // read the new configuration without a reload or a restart.
+    h.settings?.push(resolveConfig({ autoCeilingLevel: 'max' }))
+    await h.preStep(2, [userMessage(heavy)])
+    expect((await h.request(2)).reasoningEffort).toBe('max')
+  })
+
+  it('stops advertising the gear when a committed change disables the plugin', async () => {
+    const h = harness({ settings: true, selectedEffort: GEAR })
+    expect(await h.gear()).toBe(GEAR)
+
+    h.settings?.push(resolveConfig({ enabled: false }))
+    expect(await h.gear()).toBeUndefined()
+    // The sanitizer stays registered: a session still holding the gear cannot
+    // send that id to the provider.
+    await h.preStep(1, [userMessage('think hard about the deadlock')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('keeps the running configuration when a committed change is invalid', async () => {
+    const h = harness({ settings: true, selectedEffort: GEAR })
+    h.settings?.push(resolveConfig({ autoFloorLevel: 'high', autoCeilingLevel: 'low' }))
+    await h.preStep(1, [userMessage('think hard about the deadlock')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
   })
 })

@@ -158,6 +158,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 
 ## 配置
 
+最直接的方式：**设置 → 插件 → 插件配置**里找到「自动档位 Auto」卡片（本插件自带的浏览器半边），开关、下拉、数字直接在界面上改，**保存即生效**（写入 `settings.yaml`，跑着的 host 立刻重配）。下面是同样的配置在文件里的写法。
+
 ```yaml
 - insert:
     - id: auto-thinking-effort
@@ -234,6 +236,16 @@ auto-thinking-effort:
 - **写到不合法的值不会把会话弄坏**：schema 或跨字段校验（比如下限排到上限上面、`autoFloorLevel` 写了不存在的档位）会拒绝这次写入，保留上一份可用配置并警告。
 - 插件**不依赖** `@deepseek-ai/dsh-settings`（接口是按结构声明的，见 `src/index.ts`）：没挂 settings provider 时它就只用 profile 那一行配置，照常工作。
 - 命名空间通过 `ctx.inject(['settings'])` 注册（服务要等提供它的 fiber 起来才读得到），所以 provider 晚于本插件挂载也没问题。
+
+### GUI 里的配置卡片
+
+包自带浏览器半边（`src/client.js` → `lib/client.js`），向「插件」分区的 `settings.plugin.item` 槽注册一张卡片，key 就是本插件的 settings 命名空间——分区只负责把被服务的命名空间与同名卡片配对。
+
+卡片的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
+
+- 草稿先暂存在卡片里，**保存**才写入；写入是一次原子 mutation，并用草稿开始时的 revision 设栅，别的界面并发改过就拒绕而不是静默覆盖。
+- 字段出现在用户层就会标「已覆盖」；**重置** = 暂存一次清除，保存后该字段重新继承 profile 里的组装值。
+- `levels` / `rules` 这类结构化配置不在表单里（在 `settings.yaml` 手写）。
 
 ### 规则写法
 
@@ -328,6 +340,9 @@ auto-thinking-effort:
 | 真机：分类器失败不影响这一轮 | `classifierModel` 指向一个不存在的模型 | 请求照常发出，档位回落到启发式的 `high` | `session-718b1f73` |
 | **真机：`settings.yaml` 用户层生效（v0.6）** | `--patch` 把 `settings-file` 指到临时设置文件，里面只写 `auto-thinking-effort: { autoFloorLevel: low }`（profile 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `reasoningEffort: "low"`（profile 行单独跑同一句是 `"off"`） | `session-518c09e2` vs `session-3af16e67`；最终构建复核 `session-de9b7ee1` |
 | **真机：正在跑的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（全程未重启）：启动时文件里是 `autoCeilingLevel: max`，先改成 `high` 发一轮，再改回 `max` 发同一轮 | 同一进程内 `request/header` 随文件变化（`high` / `max`）；provider 自己的默认是 `high`，所以 `max` 只可能来自插件 | `session-0f47f1c6` / `session-b7f7a469`；最终构建复核（启动值为 `high`，改文件后拿到 `max`）`session-ce7ffac5` |
+| **真机：GUI 配置卡片（v0.6）** | 全新 `dsh --profile web --port 0` 进程，在「设置 → 插件 → 插件配置」里找到本插件卡片并展开 | 13 个字段渲染正确（base 值与「已覆盖」标记都对），与官方卡片并列 | 见 `docs/design.md` D19 |
+| **真机：卡片保存 → host 采纳** | 同一进程内用卡片把 `autoFloorLevel` 改成 `low` 并保存，然后新会话发 `git status` | `settings.yaml` 写入成功；该轮 `request/header` = `"low"`（base 行单独跑同句是 `"off"`） | `session-b340648b` |
+| **真机：卡片重置 = 清除覆盖** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 `minimal`） | 同一 scratch 设置文件 |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 
@@ -344,7 +359,6 @@ auto-thinking-effort:
 - **真实子代理会话**的跳过行为（`applyToSubagents: false`）：只在进程内用假 session header 测过。
 - **非 DeepSeek provider** 的钳制路径：只用假 `resolveModelInfo` 测过。
 - **插件卸载后仍有会话选着 Auto**：预期表现是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（`prepareCall` 故意不包），但没有真机跑过。
-- **GUI 里没有本插件的配置表单**：命名空间已注册（会出现在「设置 → 插件」的只读清单里），但目前只能手改 `settings.yaml`。
 
 复现真机结果：
 

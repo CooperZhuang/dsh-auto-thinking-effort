@@ -20,7 +20,12 @@ declares before being written onto the composed request. A concrete gear
 
 It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 `cordis.patch.yml`, the layer DSH merges when the package is installed through
-`dsh plugin --profile <name> add dsh-auto-thinking-effort`.
+`dsh plugin --profile <name> add dsh-auto-thinking-effort`. It also ships a
+**browser half** (`dsh.client` → `lib/client.js`, hand-written in the client
+module system's bundle format) that contributes the configuration card under
+Settings → Plugins, and it registers a **settings namespace**, so that card, a
+hand edit of `~/.dsh/settings.yaml`, and the composition row all configure the
+same resolved value.
 
 ## Hard constraints (do not "fix" these away)
 
@@ -84,6 +89,18 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
   `adopt()` re-validates every change and keeps the running runtime when one is
   rejected; `validate` refuses the bad *write* in the first place. Do not turn
   either guard into an unconditional adoption (`docs/design.md` D18).
+- **The browser half is a hand-written client bundle, and its id must equal the
+  package name.** `src/client.js` is a classic script calling
+  `window.__ModuleLoader__.load({ id, factory })`; `scripts/build-client.mjs`
+  copies it to `lib/client.js` and fails the build when the id or the shape is
+  wrong. It is the one source file `tsc` does not check (eslint still does), so
+  it stays dependency-free: React and the slot service come from the shell's
+  platform table, and the card binds nothing but `ctx.slots` and
+  `ctx.settingsScope` (`docs/design.md` D19).
+- **A card is keyed by the settings namespace it edits.** The Plugins section
+  pairs a served namespace with the card registered under that same key and
+  renders nothing for a namespace nobody claims — so the namespace name is a
+  contract shared by `SETTINGS_NAMESPACE` and the client half.
 
 ## Conventions
 

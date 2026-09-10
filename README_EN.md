@@ -157,6 +157,8 @@ Both are expressed as ladder rungs, and both accept the `$weakest` / `$strongest
 
 ## Configuration
 
+The shortest path: **Settings → Plugins → Plugin configuration** holds an “Auto gear” card (this plugin's own browser half). Toggle, pick, and type there, then **save** — that writes `settings.yaml` and the running host reconfigures at once. The file forms below are the same configuration spelled out.
+
 ```yaml
 - insert:
     - id: auto-thinking-effort
@@ -228,6 +230,16 @@ Details:
 - **An invalid edit cannot break a session**: a schema failure or a cross-field one (a floor ranking above the ceiling, an `autoFloorLevel` naming no level) is refused at the write site; the last good configuration keeps running and a warning is logged.
 - The plugin does **not** depend on `@deepseek-ai/dsh-settings` (the interface is declared structurally, see `src/index.ts`): with no settings provider mounted it simply runs on the profile row.
 - The namespace is registered through `ctx.inject(['settings'])` — a service is only readable once its providing fiber is active — so a provider that mounts after this plugin is still picked up.
+
+### The configuration card in the GUI
+
+The package ships its own browser half (`src/client.js` → `lib/client.js`) and registers a card into the Plugins section's `settings.plugin.item` slot, keyed by its own settings namespace — the section only pairs a served namespace with the card registered under the same key.
+
+Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
+
+- Drafts stay in the card until **save**, which writes one atomic mutation fenced at the revision the draft started from — a concurrent editor is refused, never silently overwritten.
+- A field present in the user layer is badged as overridden; **reset** stages a clear, so the field re-inherits the composition row on save.
+- The structured knobs (`levels`, `rules`) are not in the form; edit those in `settings.yaml`.
 
 ### Rule shape
 
@@ -322,6 +334,9 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Real run: a failing classifier cannot break the turn | `classifierModel` pointing at a nonexistent model | the request went out normally, effort fell back to the heuristic `high` | `session-718b1f73` |
 | **Real run: the `settings.yaml` user layer is honoured (v0.6)** | `--patch` pointing `settings-file` at a scratch file holding only `auto-thinking-effort: { autoFloorLevel: low }` (the profile row still says `minimal`), then `dsh --profile headless "git status"` | `reasoningEffort: "low"` (the profile row alone gives `"off"` for that prompt) | `session-518c09e2` vs `session-3af16e67`; final build re-checked in `session-de9b7ee1` |
 | **Real run: a running host reconfigures live (v0.6)** | one `dsh --profile web --port 0` process, never restarted: it booted with `autoCeilingLevel: max`, the file was changed to `high` and one turn sent, then changed back to `max` and the same turn sent again | `request/header` followed the file inside one process (`high` / `max`); the provider's own default is `high`, so `max` can only come from the plugin | `session-0f47f1c6` / `session-b7f7a469`; final build re-checked (booted at `high`, edited to `max`) in `session-ce7ffac5` |
+| **Real run: the GUI configuration card (v0.6)** | a fresh `dsh --profile web --port 0` process; the plugin's card is opened under Settings → Plugins → Plugin configuration | all 13 fields render correctly (base values and override badges included), next to the shipped cards | see `docs/design.md` D19 |
+| **Real run: a card save reaches the host** | in that same process the card set `autoFloorLevel: low` and saved; a new session then sent `git status` | `settings.yaml` gained the value and that turn's `request/header` was `"low"` (the profile row alone gives `"off"` for that prompt) | `session-b340648b` |
+| **Real run: reset clears an override** | the field's “reset” was clicked and saved | the `autoFloorLevel` line disappeared from `settings.yaml` (the field re-inherited `minimal`) | the same scratch settings file |
 
 **Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):
 
@@ -339,7 +354,6 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 - **A real subagent child** being skipped (`applyToSubagents: false`): in-process with a fake session header only.
 - **Non-DeepSeek providers** on the clamping path: fake `resolveModelInfo` only.
 - **Uninstalling the plugin while a session still selects Auto**: expected to fail loudly in-session with `UNSUPPORTED_REASONING_EFFORT` (`prepareCall` is deliberately unpatched), but never exercised for real.
-- **No GUI form for this plugin's settings**: the namespace is registered (it shows up in the read-only inventory under Settings → Plugins), but for now the `settings.yaml` section is edited by hand.
 
 Reproduce a real result:
 

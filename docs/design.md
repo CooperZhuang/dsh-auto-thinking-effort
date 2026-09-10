@@ -265,6 +265,31 @@
 
 ---
 
+## D19 — 浏览器半边：一张由本插件自己拥有的配置卡片
+
+**决定**：包自己提供浏览器半边（`src/client.js` → `lib/client.js`，`package.json` 声明 `dsh.client`），往 `settings.plugin.item` 槽里以「自己的 settings 命名空间」为 key 注册一张配置卡片。
+
+**为什么必须自己提供**：「插件」设置分区只把**被服务的命名空间**与**注册在同一 key 上的卡片**配对——「被服务却无人认领的命名空间什么都不渲染」（`dsh-client-ui-settings-plugins/README.zh.md`）。D18 只让命名空间进了「插件列表」的只读清单，所以用户在 GUI 里看不到任何可编辑入口。而官方文档明确这本就是给外部插件留的口子：“Keying on the namespace is what lets a plugin distributed outside this repository contribute a card”（`slot-contract.d.ts`）。
+
+**为什么手写而不是构建**：浏览器半边必须以 **client bundle**（经典脚本 + `window.__ModuleLoader__.load({id, factory})` 的惰性 CJS factory）形式交付，而产出该形状的 `tsdown.client.ts` 预设位于 DSH 仓库内部、不是已发布的包（官方 README 把这列为已知限制：“仓库之外的插件得自行复刻该构建”）。与其复刻一份会腐烂的预设，不如直接写那个形状：没有打包器、没有 externals（React 与槽服务由外壳播种）、整个浏览器半边是一个可审阅的文件。代价：**它不被 `tsc` 检查**（`eslint` 仍看它，`scripts/build-client.mjs` 在构建时校验 id 与 bundle 形状）；这是本仓库唯一没有类型的源码文件。
+
+**卡片做什么**：绑定 `ctx.settingsScope.bind({ namespace: 'auto-thinking-effort' })`，渲染 13 个字段（开关/下拉/数字），暂存草稿、逐字段「已覆盖」徒标与重置，保存时把全部草稿当作**一次** `mutate`（带草稿开始时的 revision 围栏），留空即 `unset`（重新继承 base）。**不**渲染 `levels`/`rules` 这类结构化配置，而是在卡片里指向 `settings.yaml`。
+
+**边界**：命名空间不可用（`status !== 'ready'`）时卡片什么都不渲染（官方 PluginCard 的约定）；`writable: false`（memory 模式）时控件全部禁用；写入被 revision 拒绝时保留草稿并把错误显示在卡片里（不静默丢弃）。
+
+**真机验证**（DSH 0.1.2-rc.1 / 全新 `dsh --profile web --port 0` 进程）：
+
+| 场景 | 结果 |
+|---|---|
+| 卡片出现在「设置 → 插件 → 插件配置」 | 与官方卡片（插件市场/终端…）并列；展开后 13 个字段、base 值与「已覆盖」标记都对 |
+| 保存写入 Host 文档 | 选 `autoCeilingLevel: high` → 保存 → scratch `settings.yaml` 里该段变成 `high`，注释与其它段未动 |
+| **GUI 写入被运行中的 host 采纳** | 同一进程内用卡片把 `autoFloorLevel` 改成 `low` → 新会话发 `git status` → 请求头 `"low"`（base 行单独跑同句是 `"off"`） |
+| 重置 = 清除覆盖 | 点该字段的「重置」→ 保存 → `settings.yaml` 里 `autoFloorLevel` 一行消失（回到继承 base 的 `minimal`） |
+
+**证据**：`src/client.js`、`scripts/build-client.mjs`、`package.json`（`dsh.client` + `exports['./client']` + `files`）、`eslint.config.js`（浏览器全局 + `sourceType: 'script'`）；session `session-b340648b`（GUI 写入后的 `git status` 轮次）。
+
+---
+
 ## 未定 / 开放问题
 
 | 编号 | 问题 | 现状 |
@@ -274,6 +299,6 @@
 | U4 | 是否要一条可选的模型分类兜底（D1） | 不做（见 D17）；若要做，必须在 `agent/pre-step` 之外异步预取（`purpose: 'session-title'/'compaction'` 的旁路），且失败时回退启发式 |
 | U5 | 是否允许规则级 `model` 覆盖（"难题换更强模型"） | 与 D2 冲突，暂不做 |
 | U6 | 卸载插件后仍有会话选着 Auto | 预期是会话内显式报 `UNSUPPORTED_REASONING_EFFORT`（D10 的 `prepareCall` 不包策略）；没真机跑过 |
-| U7 | GUI 里有没有“配置菜单”（表单） | 该命名空间会在「设置 → 插件」的只读清单里出现，但没有通用表单；目前要手改 `settings.yaml`（host 半边已完成） |
+| U7 | GUI 里的“配置菜单” | **已关闭**（D19）：本包自带浏览器半边，卡片在「设置 → 插件 → 插件配置」里可编辑并即时生效 |
 
 > **U1（同会话跨轮切换的真机验证）已关闭**：真机 GUI 会话 `session-11eeae50` 里，turn 1（Auto）写 `off`、turn 2（手动 Low）写 `low`，同一会话两条不同的 `request/header`。

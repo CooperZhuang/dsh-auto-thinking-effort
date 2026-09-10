@@ -34,6 +34,12 @@
   const PACKAGE = 'dsh-auto-thinking-effort'
   /** Level ids used when the configured ladder is empty (= the shipped ladder). */
   const SHIPPED_LEVELS = ['minimal', 'low', 'high', 'max']
+  /** Heading of the plugin's own settings page, and of its card. */
+  const SECTION_TITLE = '自动思考强度'
+  /** One line under the heading explaining what this page decides. */
+  const SECTION_INTRO = '决定「这一轮要想多久」：插件给每个支持档位的模型加一个 Auto 档位，选中后按你的提问逐轮选择 reasoning effort，手动档位（off/low/high/max）原样保留。保存后立即生效，不用重启。'
+  /** The card's one-line summary inside the Plugins section. */
+  const SECTION_SUMMARY = '每轮按提问选择推理 effort；手动档位不受影响。'
 
   /** The card's fields, in reading order: what toggles, then what tunes. */
   const FIELDS = [
@@ -53,9 +59,9 @@
     },
     {
       key: 'classifierModel',
-      kind: 'text',
+      kind: 'model',
       label: '分类模型 classifierModel',
-      hint: 'provider/model；留空 = 用该会话自己的路线。指一个小而快的模型。',
+      hint: '从你已配置的模型里选一个「小而快」的；「跟随会话模型」= 用当前会话自己的路线（不额外指定）。',
     },
     {
       key: 'autoFloorLevel',
@@ -211,6 +217,19 @@
       padding: '0 14px',
     },
     note: { color: 'var(--dsw-alias-label-tertiary, #8a8a8a)', fontSize: '12px', lineHeight: 1.5, margin: '4px 0 0' },
+    section: { display: 'flex', flexDirection: 'column', paddingBottom: '24px' },
+    sectionTitle: { fontSize: '15px', fontWeight: 600, lineHeight: 1.5, margin: '0 0 6px' },
+    sectionIntro: {
+      color: 'var(--dsw-alias-label-tertiary, #8a8a8a)',
+      fontSize: '13px',
+      lineHeight: 1.6,
+      margin: '0 0 12px',
+    },
+    group: {
+      border: '0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28))',
+      borderRadius: '12px',
+      padding: '4px 16px 12px',
+    },
   }
 
   /**
@@ -222,6 +241,19 @@
     const levels = value === undefined || value === null ? undefined : value.levels
     if (!Array.isArray(levels) || levels.length === 0) return SHIPPED_LEVELS
     return levels.map((level) => String(level.id))
+  }
+
+  /**
+   * The option values a bound select offers.
+   * @param source - the field spec.
+   * @param levels - the configured level ids.
+   * @returns the option values, or `undefined` when the field is free text.
+   */
+  function optionsFor(source, levels) {
+    if (source.kind === 'level') return levels.concat(['$weakest', '$strongest'])
+    if (source.kind === 'select') return source.options
+    if (source.kind === 'toggle') return ['true', 'false']
+    return undefined
   }
 
   /**
@@ -267,12 +299,20 @@
   }
 
   /**
-   * Build the card component bound to one namespace scope.
+   * Build both surfaces over one form: the plugin's own page in the settings
+   * navigation, and the card the Plugins section renders for this namespace.
+   *
+   * They bind the same namespace scope, so they can never disagree about the
+   * document; they differ only in chrome — a page owns the whole content
+   * column, a card collapses inside a list of cards.
+   *
    * @param React - the platform React instance.
    * @param scope - the client settings scope for this namespace.
-   * @returns the component registered into `settings.plugin.item`.
+   * @param catalog - the configured-model catalog the model select reads.
+   * @returns the components registered into `settings.section` and
+   * `settings.plugin.item`.
    */
-  function createCard(React, scope) {
+  function createForms(React, scope, catalog) {
     const h = React.createElement
 
     /**
@@ -283,34 +323,88 @@
      * @param overridden - whether the field is present in the raw user layer.
      * @param disabled - whether the Host document refuses writes.
      * @param levels - the level ids a level select may offer.
+     * @param models - the configured routes a model select may offer.
      * @param onStage - stage one draft for this field.
      * @param onReset - stage clearing this field.
      * @returns the row.
      */
-    function row(source, value, draft, overridden, disabled, levels, onStage, onReset) {
+    function row(source, value, draft, overridden, disabled, levels, models, onStage, onReset) {
       const shown = draft !== undefined ? draft : text(value)
       const bad = draft !== undefined && invalid(source, shown)
-      const options = source.kind === 'level'
-        ? levels.concat(['$weakest', '$strongest'])
-        : source.kind === 'select' ? source.options : source.kind === 'toggle' ? ['true', 'false'] : undefined
 
-      const control = options === undefined
-        ? h('input', {
-            disabled,
-            onChange: (event) => { onStage(event.target.value) },
-            style: styles.control,
-            type: source.kind === 'number' ? 'number' : 'text',
-            value: shown,
-          })
-        : h('select', {
-            disabled,
-            onChange: (event) => { onStage(event.target.value) },
-            style: styles.control,
-            value: shown,
-          }, options.map((option) => h('option', { key: option, value: option },
-            (source.labels !== undefined && source.labels[option] !== undefined
-              ? source.labels[option]
-              : source.kind === 'toggle' ? (option === 'true' ? '开启' : '关闭') : option))))
+      /**
+       * The model select's children: an explicit "follow the session" entry,
+       * one optgroup per configured provider, and — when the stored value is
+       * not in the catalog (a route that was renamed, or one this client may
+       * not see) — the stored value itself, so the form never silently drops
+       * the configuration it is showing.
+       * @param routes - the configured routes.
+       * @returns the option elements.
+       */
+      function modelOptions(routes) {
+        const children = [h('option', { key: '', value: '' }, '（跟随会话模型）')]
+        const known = new Set(routes.map((route) => `${route.provider}/${route.model}`))
+        if (shown !== '' && !known.has(shown)) {
+          children.push(h('option', { key: 'stored', value: shown }, `${shown}（当前值，不在模型目录里）`))
+        }
+        const providers = [...new Set(routes.map((route) => route.provider))]
+        for (const provider of providers) {
+          children.push(h('optgroup', { key: provider, label: provider },
+            routes.filter((route) => route.provider === provider).map((route) => h('option', {
+              key: `${route.provider}/${route.model}`,
+              value: `${route.provider}/${route.model}`,
+            }, route.model === route.name || route.name === undefined
+              ? route.model
+              : `${route.model} — ${route.name}`))))
+        }
+        return children
+      }
+
+      let control
+      if (source.kind === 'model' && models.status === 'ready' && models.routes.length > 0) {
+        control = h('select', {
+          disabled,
+          onChange: (event) => { onStage(event.target.value) },
+          style: styles.control,
+          value: shown,
+        }, modelOptions(models.routes))
+      } else if (source.kind === 'model') {
+        // No catalog (or an empty one): keep the field writable as free text,
+        // with the reason the select is missing shown underneath.
+        control = h('input', {
+          disabled,
+          onChange: (event) => { onStage(event.target.value) },
+          placeholder: 'provider/model',
+          style: styles.control,
+          type: 'text',
+          value: shown,
+        })
+      } else if (optionsFor(source, levels) === undefined) {
+        control = h('input', {
+          disabled,
+          onChange: (event) => { onStage(event.target.value) },
+          style: styles.control,
+          type: source.kind === 'number' ? 'number' : 'text',
+          value: shown,
+        })
+      } else {
+        const options = optionsFor(source, levels)
+        control = h('select', {
+          disabled,
+          onChange: (event) => { onStage(event.target.value) },
+          style: styles.control,
+          value: shown,
+        }, options.map((option) => h('option', { key: option, value: option },
+          (source.labels !== undefined && source.labels[option] !== undefined
+            ? source.labels[option]
+            : source.kind === 'toggle' ? (option === 'true' ? '开启' : '关闭') : option))))
+      }
+
+      const hint = source.kind === 'model' && models.status !== 'ready'
+        ? `${source.hint}（${models.status === 'loading'
+          ? '正在读取模型目录…'
+          : `模型目录不可用，可以直接填 provider/model${models.error === undefined ? '' : `：${models.error}`}`}）`
+        : source.hint
 
       return h('div', { key: source.key, style: styles.field },
         h('div', { style: styles.fieldHead },
@@ -322,15 +416,22 @@
         control,
         bad
           ? h('p', { style: styles.error }, '这个值 Host 不会接受。')
-          : h('p', { style: styles.hint }, source.hint))
+          : h('p', { style: styles.hint }, hint))
     }
 
-    return function AutoThinkingEffortCard() {
+    /**
+     * The staged form state both surfaces render, and the actions over it.
+     *
+     * Every hook here runs before either surface can bail out, so a status
+     * change can never reorder them.
+     * @returns the snapshot, the drafts, and the actions over them.
+     */
+    function useForm() {
       const snapshot = React.useSyncExternalStore(
         (listener) => scope.subscribe(listener),
         () => scope.getSnapshot(),
       )
-      const [open, setOpen] = React.useState(false)
+      const models = React.useSyncExternalStore(catalog.subscribe, catalog.getSnapshot)
       const [drafts, setDrafts] = React.useState({})
       const [fence, setFence] = React.useState(undefined)
       const [saving, setSaving] = React.useState(false)
@@ -339,8 +440,6 @@
       const user = snapshot.user !== null && typeof snapshot.user === 'object' ? snapshot.user : {}
       const levels = levelIds(snapshot.value)
       const staged = Object.keys(drafts)
-
-      if (snapshot.status !== 'ready') return null
 
       /**
        * Stage one field's draft, fencing the write at the revision the draft
@@ -371,8 +470,18 @@
         })
       }
 
-      /** Write every staged edit as one atomic mutation. */
-      async function save() {
+      /** Drop every staged edit. */
+      function discard() {
+        setDrafts({})
+        setFence(undefined)
+        setFailure(undefined)
+      }
+
+      /**
+       * Write every staged edit as one atomic mutation.
+       * @param onSaved - runs after the write settles successfully.
+       */
+      async function save(onSaved) {
         const ops = []
         for (const key of Object.keys(drafts)) {
           const source = FIELDS.find((field) => field.key === key)
@@ -395,7 +504,7 @@
           await scope.mutate(ops, fence)
           setDrafts({})
           setFence(undefined)
-          setOpen(false)
+          onSaved()
         } catch (error) {
           setFailure(error !== null && typeof error === 'object' && typeof error.message === 'string'
             ? error.message
@@ -413,6 +522,87 @@
 
       const disabled = !snapshot.writable || saving
 
+      return {
+        blocked, disabled, discard, drafts, failure, levels, models, reset, save, saving, snapshot, stage, staged, user,
+      }
+    }
+
+    /**
+     * The controls both surfaces render: fields, notes, and the action row.
+     * @param state - the staged form state.
+     * @returns the form body.
+     */
+    function form(state) {
+      return [
+        h('p', { key: 'writable', style: styles.error },
+          state.snapshot.writable ? '' : '这个连接把偏好设置留在本地进程内，不能写回 Host 文档。'),
+        h('p', { key: 'lead', style: styles.note }, '留空并保存 = 清除这一项的覆盖，重新继承 profile 里的组装值。'),
+        ...FIELDS.map((source) => row(
+          source,
+          state.snapshot.value === undefined ? undefined : state.snapshot.value[source.key],
+          state.drafts[source.key],
+          Object.prototype.hasOwnProperty.call(state.user, source.key),
+          state.disabled,
+          state.levels,
+          state.models,
+          (next) => { state.stage(source.key, next) },
+          () => { state.reset(source.key) },
+        )),
+        state.failure === undefined
+          ? null
+          : h('p', { key: 'failure', style: styles.error }, `保存失败：${state.failure}`),
+        h('p', { key: 'structured', style: styles.note },
+          '档位阶梯 levels 与自定义规则 rules 是结构化配置，请直接编辑 ~/.dsh/settings.yaml 的 auto-thinking-effort 段（改完立即生效，不用重启）。'),
+        h('div', { key: 'actions', style: styles.footer },
+          h('button', {
+            disabled: state.staged.length === 0 || state.saving,
+            onClick: state.discard,
+            style: styles.secondary,
+            type: 'button',
+          }, '放弃修改'),
+          h('button', {
+            disabled: state.blocked || state.staged.length === 0,
+            onClick: () => { void state.save() },
+            style: styles.primary,
+            type: 'button',
+          }, state.saving ? '保存中…' : '保存')),
+      ]
+    }
+
+    /**
+     * The plugin's page in the settings navigation.
+     *
+     * It renders a note rather than nothing while the namespace is not ready: a
+     * navigation row must never lead to a blank panel.
+     * @returns the section component.
+     */
+    function Section() {
+      const state = useForm()
+      const heading = h('h2', { style: styles.sectionTitle }, SECTION_TITLE)
+      if (state.snapshot.status !== 'ready') {
+        return h('div', { style: styles.section }, heading, h('p', { style: styles.note },
+          state.snapshot.status === 'loading'
+            ? '正在读取配置…'
+            : '这个部署没有把 auto-thinking-effort 设置暴露给浏览器（没有 settings provider，或连接只把偏好留在本页）。配置仍然可以写在 ~/.dsh/settings.yaml 的 auto-thinking-effort 段。'))
+      }
+      return h('div', { style: styles.section },
+        heading,
+        h('p', { style: styles.sectionIntro }, SECTION_INTRO),
+        h('div', { style: styles.group }, form(state)))
+    }
+
+    /**
+     * The card the Plugins section renders for this namespace.
+     *
+     * Renders nothing while the namespace is unavailable (the section's own
+     * contract for cards: a deployment that does not compose the owner should
+     * show no trace of it).
+     * @returns the card component.
+     */
+    function Card() {
+      const state = useForm()
+      const [open, setOpen] = React.useState(false)
+      if (state.snapshot.status !== 'ready') return null
       return h('div', { style: styles.card },
         h('button', {
           'aria-expanded': open,
@@ -421,43 +611,110 @@
           type: 'button',
         },
           h('div', null,
-            h('div', { style: styles.title }, '自动档位 Auto（每轮按提问选择推理 effort）'),
-            h('div', { style: styles.description },
-              '在选择器里加一个 Auto 档位；选中后每轮按你的提问决定 effort，手动档位（off/low/high/max）不受影响。')),
-          h('div', { style: styles.description }, staged.length > 0 ? `未保存 ${staged.length}` : (open ? '▾' : '▸'))),
+            h('div', { style: styles.title }, SECTION_TITLE),
+            h('div', { style: styles.description }, SECTION_SUMMARY)),
+          h('div', { style: styles.description },
+            state.staged.length > 0 ? `未保存 ${state.staged.length}` : (open ? '▾' : '▸'))),
         open
-          ? h('div', { style: styles.body },
-              snapshot.writable
-                ? null
-                : h('p', { style: styles.error }, '这个连接把偏好设置留在本地进程内，不能写回 Host 文档。'),
-              h('p', { style: styles.note }, '留空并保存 = 清除这一项的覆盖，重新继承 profile 里的组装值。'),
-              FIELDS.map((source) => row(
-                source,
-                snapshot.value === undefined ? undefined : snapshot.value[source.key],
-                drafts[source.key],
-                Object.prototype.hasOwnProperty.call(user, source.key),
-                disabled,
-                levels,
-                (next) => { stage(source.key, next) },
-                () => { reset(source.key) },
-              )),
-              failure === undefined ? null : h('p', { style: styles.error }, `保存失败：${failure}`),
-              h('p', { style: styles.note },
-                '档位阶梯 levels 与自定义规则 rules 是结构化配置，请直接编辑 ~/.dsh/settings.yaml 的 auto-thinking-effort 段（改完立即生效，不用重启）。'),
-              h('div', { style: styles.footer },
-                h('button', {
-                  disabled: staged.length === 0 || saving,
-                  onClick: () => { setDrafts({}); setFence(undefined); setFailure(undefined) },
-                  style: styles.secondary,
-                  type: 'button',
-                }, '放弃修改'),
-                h('button', {
-                  disabled: blocked || staged.length === 0,
-                  onClick: () => { void save() },
-                  style: styles.primary,
-                  type: 'button',
-                }, saving ? '保存中…' : '保存')))
+          ? h('div', { style: styles.body }, form(state))
           : null)
+    }
+
+    return { Card, Section }
+  }
+
+  /**
+   * The configured-model catalog the model select reads, as a small store.
+   *
+   * The catalog is the Host's own answer (`remote.session.modelCatalog`), i.e.
+   * exactly the list the composer's model picker shows — so "the models you
+   * already configured" means the same thing in both places, and a route that
+   * is added later shows up here after the next adapter update.
+   *
+   * The read is lazy and guarded: a deployment without the session remotes
+   * (or without a mounted API gateway) simply reports `unavailable` and the
+   * form degrades to a free-text route field.
+   *
+   * @returns the store: `attach`, `getSnapshot`, `subscribe`, and `refresh`.
+   */
+  function createCatalog() {
+    let state = { status: 'loading', routes: [], error: undefined }
+    const listeners = new Set()
+    let inflight
+    let remote
+
+    const publish = (next) => {
+      state = next
+      for (const listener of listeners) listener()
+    }
+
+    const load = () => {
+      if (inflight !== undefined) return inflight
+      const session = remote === null || remote === undefined ? undefined : remote.session
+      if (session === undefined || typeof session.modelCatalog !== 'function') {
+        publish({ status: 'unavailable', routes: [], error: undefined })
+        return Promise.resolve()
+      }
+      inflight = session.modelCatalog()
+        .then((response) => {
+          if (response === null || typeof response !== 'object' || response.ok !== true) {
+            const error = response !== null && typeof response === 'object' && response.error !== undefined
+              ? `${String(response.error.code)}: ${String(response.error.message)}`
+              : 'modelCatalog did not answer'
+            publish({ status: 'error', routes: [], error })
+            return
+          }
+          const groups = response.value !== null && typeof response.value === 'object' && Array.isArray(response.value.groups)
+            ? response.value.groups
+            : []
+          const routes = groups.flatMap((group) => {
+            const models = Array.isArray(group.models) ? group.models : []
+            return models.map((model) => ({
+              provider: String(group.id),
+              model: String(model.id),
+              name: model.name === undefined ? undefined : String(model.name),
+            }))
+          })
+          publish({ status: 'ready', routes, error: undefined })
+        })
+        .catch((error) => {
+          publish({
+            status: 'error',
+            routes: [],
+            error: error !== null && typeof error === 'object' && typeof error.message === 'string'
+              ? error.message
+              : String(error),
+          })
+        })
+        .finally(() => { inflight = undefined })
+      return inflight
+    }
+
+    return {
+      /**
+       * Bind the store to the remote namespace that answers the catalog, and
+       * load it. Called from the injected context, because a service is only
+       * readable once its providing fiber is active — a plain `ctx.get` here
+       * would silently return nothing and the select would never appear.
+       * @param next - the `remote` service, from the injected context.
+       */
+      attach: (next) => {
+        if (remote === next) return
+        remote = next
+        void load()
+        // The catalog is Host-generation data: refresh it when the adapters or
+        // the credentials change, exactly as the model picker does.
+        if (next !== null && next !== undefined && typeof next.$on === 'function') {
+          next.$on('llm/adapters-updated', () => { void load() })
+          next.$on('credentials/reference-updated', () => { void load() })
+        }
+      },
+      getSnapshot: () => state,
+      subscribe: (listener) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      refresh: () => { void load() },
     }
   }
 
@@ -472,14 +729,34 @@
       const React = require('react')
 
       /**
-       * Mount the card on the calling plugin's lifecycle.
+       * Mount both surfaces on the calling plugin's lifecycle.
        * @param ctx - the browser plugin context.
        */
       function apply(ctx) {
         const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
+        const catalog = createCatalog()
+        // `remote` is reached through `ctx.inject`, not `ctx.get`: a service is
+        // only readable once its providing fiber is active, so the plain read
+        // silently returns nothing here (the same trap the host half hits with
+        // `ctx.settings`). The callback also re-runs if the service is replaced.
+        ctx.inject(['remote', 'remote.session'], (remoteCtx) => {
+          catalog.attach(remoteCtx.get('remote'))
+        })
+        const forms = createForms(React, scope, catalog)
+        // The plugin's own row in the settings navigation is the primary
+        // surface: that is where a user looks for a gear. Order 12 keeps it
+        // right after 模型 (10) and before 插件 (15) — this setting is about
+        // how much the model thinks.
+        ctx.slots.inject('settings.section', () => ctx.slots.register(
+          { name: 'settings.section', id: NAMESPACE, order: 12, label: SECTION_TITLE },
+          forms.Section,
+        ))
+        // The card in the Plugins section, keyed by the same namespace: the
+        // conventional home for a plugin's configuration, and the only surface
+        // a deployment that filters sections by id would still show.
         ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
           { name: 'settings.plugin.item', key: NAMESPACE },
-          createCard(React, scope),
+          forms.Card,
         ))
       }
 

@@ -25,7 +25,7 @@ describe('Config defaults', () => {
     expect(config.autoFloorLevel).toBe('minimal')
     expect(config.autoCeilingLevel).toBe('high')
     expect(config.logDecisions).toBe(true)
-    expect(config.classifier).toBe('heuristic')
+    expect(config.classifier).toBe('model')
     expect(config.classifierModel).toBe('')
     expect(config.classifierTimeoutMs).toBe(8_000)
     expect(config.classifierMaxTokens).toBe(64)

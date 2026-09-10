@@ -49,7 +49,11 @@ export interface ConfigShape {
   autoFloorLevel: string
   /** Highest level a score-derived auto decision may reach (pins bypass it). */
   autoCeilingLevel: string
-  /** Which backend decides the level: the shipped heuristics, or a model call. */
+  /**
+   * Which backend decides the level: a model call (the shipped default — it
+   * reads the request instead of its shape), or the pure heuristics, which
+   * make no call at all.
+   */
   classifier: 'heuristic' | 'model'
   /**
    * `provider/model` the model classifier calls; empty reuses the request's own
@@ -80,7 +84,7 @@ export const Config: z<ConfigShape> = z.object({
     maxScore: z.number().required(false),
     description: z.string().required(false),
   })).default([]),
-  classifier: z.union(['heuristic', 'model'] as const).default('heuristic'),
+  classifier: z.union(['heuristic', 'model'] as const).default('model'),
   classifierModel: z.string().default(''),
   classifierTimeoutMs: z.number().default(8_000),
   classifierMaxTokens: z.number().default(64),

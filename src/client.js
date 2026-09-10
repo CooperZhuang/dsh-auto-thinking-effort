@@ -451,9 +451,12 @@
 
       /**
        * Write every staged edit as one atomic mutation.
-       * @param onSaved - runs after the write settles successfully.
+       *
+       * Nothing may run between the write settling and the drafts clearing: a
+       * throw in there would be caught below and reported as a failed save even
+       * though the Host already stored it.
        */
-      async function save(onSaved) {
+      async function save() {
         const ops = []
         for (const key of Object.keys(drafts)) {
           const source = FIELDS.find((field) => field.key === key)
@@ -476,7 +479,6 @@
           await scope.mutate(ops, fence)
           setDrafts({})
           setFence(undefined)
-          onSaved()
         } catch (error) {
           setFailure(error !== null && typeof error === 'object' && typeof error.message === 'string'
             ? error.message

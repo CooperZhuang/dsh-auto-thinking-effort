@@ -34,12 +34,10 @@
   const PACKAGE = 'dsh-auto-thinking-effort'
   /** Level ids used when the configured ladder is empty (= the shipped ladder). */
   const SHIPPED_LEVELS = ['minimal', 'low', 'high', 'max']
-  /** Heading of the plugin's own settings page, and of its card. */
+  /** Heading of the plugin's settings page. */
   const SECTION_TITLE = '自动思考强度'
   /** One line under the heading explaining what this page decides. */
   const SECTION_INTRO = '决定「这一轮要想多久」：插件给每个支持档位的模型加一个 Auto 档位，选中后按你的提问逐轮选择 reasoning effort，手动档位（off/low/high/max）原样保留。保存后立即生效，不用重启。'
-  /** The card's one-line summary inside the Plugins section. */
-  const SECTION_SUMMARY = '每轮按提问选择推理 effort；手动档位不受影响。'
 
   /** The card's fields, in reading order: what toggles, then what tunes. */
   const FIELDS = [
@@ -125,31 +123,8 @@
     },
   ]
 
-  /** Inline styles: the card lives outside every stylesheet, so it carries its own. */
+  /** Inline styles: the page lives outside every stylesheet, so it carries its own. */
   const styles = {
-    card: {
-      border: '0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28))',
-      borderRadius: '12px',
-      marginBottom: '8px',
-      overflow: 'hidden',
-    },
-    header: {
-      alignItems: 'center',
-      background: 'none',
-      border: 'none',
-      color: 'inherit',
-      cursor: 'pointer',
-      display: 'flex',
-      font: 'inherit',
-      gap: '12px',
-      justifyContent: 'space-between',
-      padding: '12px 16px',
-      textAlign: 'left',
-      width: '100%',
-    },
-    title: { fontSize: '13px', fontWeight: 500, lineHeight: 1.5 },
-    description: { color: 'var(--dsw-alias-label-tertiary, #8a8a8a)', fontSize: '12px', lineHeight: 1.5 },
-    body: { borderTop: '0.5px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28))', padding: '4px 16px 12px' },
     field: { display: 'flex', flexDirection: 'column', gap: '6px', padding: '12px 0' },
     fieldHead: { alignItems: 'center', display: 'flex', gap: '8px' },
     label: { flex: 1, fontSize: '13px', fontWeight: 500, lineHeight: 1.5 },
@@ -299,20 +274,17 @@
   }
 
   /**
-   * Build both surfaces over one form: the plugin's own page in the settings
-   * navigation, and the card the Plugins section renders for this namespace.
+   * Build the plugin's settings page.
    *
-   * They bind the same namespace scope, so they can never disagree about the
-   * document; they differ only in chrome — a page owns the whole content
-   * column, a card collapses inside a list of cards.
+   * It binds this namespace's client settings scope, so the page and the
+   * settings document (or a hand edit of `settings.yaml`) can never disagree.
    *
    * @param React - the platform React instance.
    * @param scope - the client settings scope for this namespace.
    * @param catalog - the configured-model catalog the model select reads.
-   * @returns the components registered into `settings.section` and
-   * `settings.plugin.item`.
+   * @returns the component registered into `settings.section`.
    */
-  function createForms(React, scope, catalog) {
+  function createSection(React, scope, catalog) {
     const h = React.createElement
 
     /**
@@ -534,8 +506,9 @@
      */
     function form(state) {
       return [
-        h('p', { key: 'writable', style: styles.error },
-          state.snapshot.writable ? '' : '这个连接把偏好设置留在本地进程内，不能写回 Host 文档。'),
+        state.snapshot.writable
+          ? null
+          : h('p', { key: 'writable', style: styles.error }, '这个连接把偏好设置留在本地进程内，不能写回 Host 文档。'),
         h('p', { key: 'lead', style: styles.note }, '留空并保存 = 清除这一项的覆盖，重新继承 profile 里的组装值。'),
         ...FIELDS.map((source) => row(
           source,
@@ -591,36 +564,7 @@
         h('div', { style: styles.group }, form(state)))
     }
 
-    /**
-     * The card the Plugins section renders for this namespace.
-     *
-     * Renders nothing while the namespace is unavailable (the section's own
-     * contract for cards: a deployment that does not compose the owner should
-     * show no trace of it).
-     * @returns the card component.
-     */
-    function Card() {
-      const state = useForm()
-      const [open, setOpen] = React.useState(false)
-      if (state.snapshot.status !== 'ready') return null
-      return h('div', { style: styles.card },
-        h('button', {
-          'aria-expanded': open,
-          onClick: () => { setOpen(!open) },
-          style: styles.header,
-          type: 'button',
-        },
-          h('div', null,
-            h('div', { style: styles.title }, SECTION_TITLE),
-            h('div', { style: styles.description }, SECTION_SUMMARY)),
-          h('div', { style: styles.description },
-            state.staged.length > 0 ? `未保存 ${state.staged.length}` : (open ? '▾' : '▸'))),
-        open
-          ? h('div', { style: styles.body }, form(state))
-          : null)
-    }
-
-    return { Card, Section }
+    return Section
   }
 
   /**
@@ -729,7 +673,7 @@
       const React = require('react')
 
       /**
-       * Mount both surfaces on the calling plugin's lifecycle.
+       * Mount the settings page on the calling plugin's lifecycle.
        * @param ctx - the browser plugin context.
        */
       function apply(ctx) {
@@ -742,21 +686,13 @@
         ctx.inject(['remote', 'remote.session'], (remoteCtx) => {
           catalog.attach(remoteCtx.get('remote'))
         })
-        const forms = createForms(React, scope, catalog)
-        // The plugin's own row in the settings navigation is the primary
-        // surface: that is where a user looks for a gear. Order 12 keeps it
-        // right after 模型 (10) and before 插件 (15) — this setting is about
-        // how much the model thinks.
+        // This plugin's row in the settings navigation is its one surface: that
+        // is where a user looks for a gear, so the Plugins section does not
+        // also carry a card for it. Order 12 keeps the row right after 模型 (10)
+        // and before 插件 (15) — this setting decides how much the model thinks.
         ctx.slots.inject('settings.section', () => ctx.slots.register(
           { name: 'settings.section', id: NAMESPACE, order: 12, label: SECTION_TITLE },
-          forms.Section,
-        ))
-        // The card in the Plugins section, keyed by the same namespace: the
-        // conventional home for a plugin's configuration, and the only surface
-        // a deployment that filters sections by id would still show.
-        ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-          { name: 'settings.plugin.item', key: NAMESPACE },
-          forms.Card,
+          createSection(React, scope, catalog),
         ))
       }
 

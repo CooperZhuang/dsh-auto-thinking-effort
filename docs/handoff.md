@@ -34,7 +34,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 |---|---|
 | GitHub | https://github.com/CooperZhuang/dsh-auto-thinking-effort （public） |
 | 本地 | `C:\CodeRepository\dsh-auto-thinking-effort` |
-| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.5.0`（**未发布**） |
+| 包名 / 版本 | `dsh-auto-thinking-effort` / `0.6.0`（**未发布**） |
 | Node / pnpm | v24.16.0 / 12.3.4（`packageManager` 已钉） |
 | DSH 依赖 | **`0.1.2-rc.1`**（npm `next` dist-tag，不是 `latest`） |
 | DSH CLI | `C:\Users\Cooper\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` |

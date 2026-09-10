@@ -26,8 +26,10 @@ So "how do I specify it manually?" needs no extra mechanism: **pick a concrete g
 
 | `classifier` | How the level is decided | Latency / cost |
 |---|---|---|
-| `heuristic` (default) | a pure function: weighted regex rules + structural features | zero |
-| `model` | **one small-model call**: the allowed levels and their descriptions go into a system prompt, the model answers with a single word | +1 small request per turn (hard timeout) |
+| `model` (default) | **one small-model call**: the allowed levels and their descriptions go into a system prompt, the model answers with a single word | +1 small request per turn (hard timeout, falls back) |
+| `heuristic` | a pure function: weighted regex rules + structural features | zero |
+
+`model` is the default because reading the question beats reading its shape; the call answers one word, has a hard deadline, and falls back to the heuristics on any failure. Set `classifier: heuristic` for a path that makes no call at all.
 
 The model backend's contract:
 
@@ -51,7 +53,7 @@ The model backend's contract:
 ### Boundaries
 - **Only `reasoningEffort` changes.** Provider, model, system prompt, and message list are never touched. The worst case is a turn that thinks more or less than it needed — never a different conversation.
 - **The Auto id never reaches a provider.** It is a picker marker; `agent/request` turns it into a real rung before `prepareCall` runs. Even with `enabled: false` a fallback listener stays registered so a stored Auto cannot leak into a request.
-- **Two classifier backends, and no model call by default.** The default is a pure function (regex + structural features): zero latency, zero cost, unit-testable, reproducible. Set `classifier: model` to have a small model judge the request instead (see below). The default band stays the provider's normal effort rather than the cheapest one.
+- **Classification is one small-model call by default** (`classifier: model`): it reads the question rather than its shape, answers a single level word, runs under a hard deadline, and falls back to the pure-function heuristics on any failure. Set `classifier: heuristic` for zero latency and zero cost (see below). The default band stays the provider's normal effort rather than the cheapest one.
 - **Auto never pollutes the global default**: the plugin intercepts `agent-default-model.saveSelection` and strips Auto, persisting "no explicit effort" instead. A profile without this plugin then reads the provider default instead of an id it cannot resolve.
 
 ---
@@ -195,8 +197,8 @@ The shortest path: **Settings → Plugins → Plugin configuration** holds an �
 | `autoWhenUnset` | `true` | Treat a request with no explicit effort as auto too. |
 | `autoFloorLevel` | `minimal` | Weakest level `auto` may resolve to; the default is the ladder minimum (= thinking may be switched off). Set `low` to forbid that. |
 | `autoCeilingLevel` | `high` | Highest **score-derived** level; pins bypass it. |
-| `classifier` | `heuristic` | Which backend decides: `heuristic` (pure function) or `model` (one small-model call). |
-| `classifierModel` | `''` | Route for that call, `provider/model`; empty uses the session's own route. |
+| `classifier` | `model` | Which backend decides: `model` (default, one small-model call) or `heuristic` (pure function, no call). |
+| `classifierModel` | `''` | Route for that call, `provider/model`; empty follows the session's own route. The settings page renders this as a dropdown of your configured models. |
 | `classifierTimeoutMs` | `8000` | Hard deadline for one classifier call, in milliseconds. |
 | `classifierMaxTokens` | `64` | Output cap for the classifier call (it answers with one word). |
 | `applyToSubagents` | `false` | Also classify subagent children (their route is usually chosen by the caller). |
@@ -231,13 +233,17 @@ Details:
 - The plugin does **not** depend on `@deepseek-ai/dsh-settings` (the interface is declared structurally, see `src/index.ts`): with no settings provider mounted it simply runs on the profile row.
 - The namespace is registered through `ctx.inject(['settings'])` — a service is only readable once its providing fiber is active — so a provider that mounts after this plugin is still picked up.
 
-### The configuration card in the GUI
+### Configuration in the GUI: 自动思考强度
 
-The package ships its own browser half (`src/client.js` → `lib/client.js`) and registers a card into the Plugins section's `settings.plugin.item` slot, keyed by its own settings namespace — the section only pairs a served namespace with the card registered under the same key.
+The package ships its own browser half (`src/client.js` → `lib/client.js`) and contributes two surfaces:
 
-Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
+- **Settings → 自动思考强度** — its own page in the settings navigation, right after 模型;
+- a card in **Settings → Plugins → Plugin configuration**, keyed by its own settings namespace (the section only pairs a served namespace with the card registered under that same key).
 
-- Drafts stay in the card until **save**, which writes one atomic mutation fenced at the revision the draft started from — a concurrent editor is refused, never silently overwritten.
+Both bind one namespace scope, so they can never disagree. Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
+
+- `classifierModel` is a **dropdown** fed by the host's model catalog (`remote.session.modelCatalog` — the same list the composer's model picker shows), so "the models you already configured" means the same thing in both places; an extra entry means "follow the session's own route". When the catalog is unavailable the field degrades to free text and says why.
+- Drafts stay in the form until **save**, which writes one atomic mutation fenced at the revision the draft started from — a concurrent editor is refused, never silently overwritten.
 - A field present in the user layer is badged as overridden; **reset** stages a clear, so the field re-inherits the composition row on save.
 - The structured knobs (`levels`, `rules`) are not in the form; edit those in `settings.yaml`.
 
@@ -267,7 +273,7 @@ References: [`auto-thinking/classifier.ts`](https://github.com/can1357/oh-my-pi/
 
 | Dimension | oh-my-pi | This plugin |
 |---|---|---|
-| Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | **configurable**: pure heuristics by default (zero calls); `classifier: model` makes it a small-model call too |
+| Classification | **one small-model call** (`tiny`/`smol`, or a local on-device <2B model) asked to answer with a single word | **one small-model call by default too** (`classifier: model`, route selectable); `classifier: heuristic` is the zero-call pure-function path |
 | Where `auto` lives | an agent-local selector that is **never an Effort**, resolved before provider mapping | a synthetic gear injected into the model's rung list (DSH has no contribution hook) |
 | Floor | never below `low` (hard-coded) | **no floor by default** (may reach `off`); set `autoFloorLevel: low` to forbid it |
 | Ceiling | default `xhigh` (one below top); only `ultrathink` reaches `max` | default `high`; only an explicit pin reaches `max` |
@@ -334,8 +340,9 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Real run: a failing classifier cannot break the turn | `classifierModel` pointing at a nonexistent model | the request went out normally, effort fell back to the heuristic `high` | `session-718b1f73` |
 | **Real run: the `settings.yaml` user layer is honoured (v0.6)** | `--patch` pointing `settings-file` at a scratch file holding only `auto-thinking-effort: { autoFloorLevel: low }` (the profile row still says `minimal`), then `dsh --profile headless "git status"` | `reasoningEffort: "low"` (the profile row alone gives `"off"` for that prompt) | `session-518c09e2` vs `session-3af16e67`; final build re-checked in `session-de9b7ee1` |
 | **Real run: a running host reconfigures live (v0.6)** | one `dsh --profile web --port 0` process, never restarted: it booted with `autoCeilingLevel: max`, the file was changed to `high` and one turn sent, then changed back to `max` and the same turn sent again | `request/header` followed the file inside one process (`high` / `max`); the provider's own default is `high`, so `max` can only come from the plugin | `session-0f47f1c6` / `session-b7f7a469`; final build re-checked (booted at `high`, edited to `max`) in `session-ce7ffac5` |
-| **Real run: the GUI configuration card (v0.6)** | a fresh `dsh --profile web --port 0` process; the plugin's card is opened under Settings → Plugins → Plugin configuration | all 13 fields render correctly (base values and override badges included), next to the shipped cards | see `docs/design.md` D19 |
-| **Real run: a card save reaches the host** | in that same process the card set `autoFloorLevel: low` and saved; a new session then sent `git status` | `settings.yaml` gained the value and that turn's `request/header` was `"low"` (the profile row alone gives `"off"` for that prompt) | `session-b340648b` |
+| **Real run: its own page in Settings (v0.6)** | a fresh `dsh --profile web --port 0` process, Settings opened | the left navigation gains 自动思考强度 (right after 模型) and the page renders the whole form; `classifier` defaults to `model` | `docs/design.md` D19/D20 |
+| **Real run: the `classifierModel` dropdown** | same process, field expanded | options are the host catalog's configured models (`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp`) plus “follow the session model”; picking one and saving wrote `classifierModel: deepseek-official/deepseek-v4-flash` | the same scratch settings file |
+| **Real run: a form save reaches the host** | in that same process the form set `autoFloorLevel: low` and saved; a new session then sent `git status` | `settings.yaml` gained the value and that turn's `request/header` was `"low"` (the profile row alone gives `"off"` for that prompt) | `session-b340648b` |
 | **Real run: reset clears an override** | the field's “reset” was clicked and saved | the `autoFloorLevel` line disappeared from `settings.yaml` (the field re-inherited `minimal`) | the same scratch settings file |
 
 **Verified in-process only** (`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`, using a real cordis Context, the real `installModelSelection`, and the real waterfall dispatcher — with the selection listener deliberately registered first):

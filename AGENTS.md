@@ -22,10 +22,11 @@ It is a **bundle**: `package.json` declares `dsh.bundle.patch` →
 `cordis.patch.yml`, the layer DSH merges when the package is installed through
 `dsh plugin --profile <name> add dsh-auto-thinking-effort`. It also ships a
 **browser half** (`dsh.client` → `lib/client.js`, hand-written in the client
-module system's bundle format) that contributes the configuration card under
-Settings → Plugins, and it registers a **settings namespace**, so that card, a
-hand edit of `~/.dsh/settings.yaml`, and the composition row all configure the
-same resolved value.
+module system's bundle format) that contributes its own settings page
+(Settings → 自动思考强度) plus a card under Settings → Plugins, and it registers
+a **settings namespace**, so that page, that card, a hand edit of
+`~/.dsh/settings.yaml`, and the composition row all configure the same resolved
+value.
 
 ## Hard constraints (do not "fix" these away)
 
@@ -52,13 +53,15 @@ same resolved value.
   here would break routing and cache expectations; it is out of scope by design.
 - **Never mutate the composed config.** Return a new object only when the effort
   actually changes; otherwise return the same object the loop handed us.
-- **The default classifier makes no model call.** The heuristic path stays pure,
-  synchronous, and deterministic (D1). `classifier: model` is the one sanctioned
-  exception: it runs through `src/model-classifier.ts`, never through
-  `agent/request`, always under a timeout, and **any** failure resolves to
-  `undefined` so the turn continues on the heuristic level (D17). A pinned turn
-  is never sent to it either — a pin is the user speaking, and a model must not
-  be able to outvote an explicit `ultrathink`.
+- **`classifier: model` is the shipped default; `heuristic` must stay a
+  first-class path.** The default is the one sanctioned model call (D20): it
+  runs through `src/model-classifier.ts`, never through `agent/request`, always
+  under a timeout, and **any** failure resolves to `undefined` so the turn
+  continues on the heuristic level (D17). A pinned turn is never sent to it
+  either — a pin is the user speaking, and a model must not be able to outvote
+  an explicit `ultrathink`. The heuristic path (D1) stays pure, synchronous,
+  deterministic and dependency-free: `classifier: heuristic` must keep working
+  as the zero-call option, and the wiring tests keep it as their baseline.
 - **Never throw on the request path.** Every failure path returns the composed
   config unchanged — except a gear, which must be replaced or dropped.
 - **`g` / `y` regex flags are rejected** (`src/signals.ts`): a stateful
@@ -95,8 +98,13 @@ same resolved value.
   copies it to `lib/client.js` and fails the build when the id or the shape is
   wrong. It is the one source file `tsc` does not check (eslint still does), so
   it stays dependency-free: React and the slot service come from the shell's
-  platform table, and the card binds nothing but `ctx.slots` and
-  `ctx.settingsScope` (`docs/design.md` D19).
+  platform table, and the surfaces bind nothing but `ctx.slots`,
+  `ctx.settingsScope`, and the model catalog read through
+  `ctx.inject(['remote', 'remote.session'], …)` (`docs/design.md` D19/D20).
+- **The plugin owns a page, not only a card.** `settings.section` is keyed by
+  this plugin's own id (`auto-thinking-effort`, `order: 12`, label
+  「自动思考强度」) and is the surface users actually look for; the Plugins card
+  is kept alongside it. Both render one shared form component over one scope.
 - **A card is keyed by the settings namespace it edits.** The Plugins section
   pairs a served namespace with the card registered under that same key and
   renders nothing for a namespace nobody claims — so the namespace name is a

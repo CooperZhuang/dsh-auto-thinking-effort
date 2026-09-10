@@ -19,7 +19,7 @@
 
 **证据**：`dsh-agent-loop/lib/index.js:700-756`（`buildRequest` 每 step 调一次）；`dsh-llm/lib/types/index.d.ts:343`（`resolveModelInfo` 本身就是 async）。
 
-**未定**：是否给"模棱两可"的情况加一条可选的轻量模型分类（`classifier: llm`）作为兜底。目前不做——见 D1 的理由 1。
+**未定**：~~是否给"模棱两可"的情况加一条可选的轻量模型分类作为兜底~~ → 见 D17（已做成可关的后端），以及 **D20：v0.6 起 `classifier` 的默认值是 `model`** —— 启发式仍是零成本、可复现、可单测的那条路，只是不再默认。
 
 ---
 
@@ -215,7 +215,7 @@
 
 ## D17 — 模型分类是**可选后端**，默认关
 
-**决定**：`classifier` 有两个取值：`heuristic`（默认，纯函数）与 `model`（一次小模型调用）。模型后端只借鉴 oh-my-pi 那条路的**契约**，不改变默认行为。
+**决定**：`classifier` 有两个取值：`model`（一次小模型调用）与 `heuristic`（纯函数，零调用）。模型后端只借鉴 oh-my-pi 那条路的**契约**；默认值见 D20。
 
 **契约（都是为了让「多一次调用」不变成「多一个故障点」）**：
 
@@ -230,7 +230,7 @@
 | 调用直接走 `ctx.llm.stream`，**不经过 `agent/request`** | 分类调用与被分类的请求在结构上不可能互相干扰 |
 | 每个档位的 `description` 参与渲染提示 | 自定义阶梯能向模型解释自己（`LevelSpec.description`） |
 
-**为什么默认仍然是启发式**：按 D1，默认路径要零延迟、确定性、可复现。模型后端每轮多一次请求（他们用 `tiny` 角色和本地 on-device 模型摊薄，我们没有等价的小模型角色概念，所以让用户指定 `classifierModel`）。
+**为什么从 v0.6 起默认是 `model`**：见 D20。启发式仍是随时可切回的零成本路径（一条 `classifier: heuristic`）。
 
 **真机验证**（`deepseek-v4-flash` 作为分类器，同一句话）：启发式 `high` → 模型 `low`（模型判断它 trivial 并覆盖了启发式）；`classifierModel` 指向不存在的模型时回落到 `high` 且请求照常发出（`session-718b1f73`）。
 
@@ -287,6 +287,39 @@
 | 重置 = 清除覆盖 | 点该字段的「重置」→ 保存 → `settings.yaml` 里 `autoFloorLevel` 一行消失（回到继承 base 的 `minimal`） |
 
 **证据**：`src/client.js`、`scripts/build-client.mjs`、`package.json`（`dsh.client` + `exports['./client']` + `files`）、`eslint.config.js`（浏览器全局 + `sourceType: 'script'`）；session `session-b340648b`（GUI 写入后的 `git status` 轮次）。
+
+---
+
+## D20 — 设置页里独立的一页、模型下拉、以及「默认即最优化」
+
+**决定**（v0.6 定稿，三条都是用户明确要求的）：
+
+1. 浏览器半边除了「插件 → 插件配置」里的卡片，还向 `settings.section` 注册**一页自己的设置**，label「自动思考强度」、`order: 12`（排在「模型」10 与「插件」15 之间）——用户找档位设置时看的是左侧菜单，不是插件列表。
+2. `classifierModel` 从自由文本改成**下拉框**，选项来自 Host 的模型目录（`remote.session.modelCatalog`，即输入框旁那个模型选择器同一份数据），外加一个空值项「（跟随会话模型）」。
+3. 出厂默认就是推荐配置：**`classifier: model`**（schema 默认 + bundle 行的 base 层都改），其余策略保持 D13/D14（下限不设、分数不超过 `high`）。
+
+**为什么**：
+
+- 卡片是「插件的配置放在插件那一栏」的惯例，但**不是**用户找设置的地方；独立一页才符合「设置里应该有这一项」的预期。两者共用同一个表单组件与同一个命名空间 scope，所以可以并存、永远不会不一致。
+- 「已配置好的模型」在 DSH 里只有一个权威答案：模型目录。让用户手敲 `provider/model` 既容易打错，也和旁边的模型选择器说法不一致。目录拿不到时降级成文本框（并把原因写在字段下面），所以没有 remotes 的部署仍可用。
+- 分类质量的主要来源是「读懂提问」而不是「读懂提问的形状」；`model` 只回一个词、有硬超时、任何失败回落启发式，代价可控。想零调用就一行切回 `heuristic`（D1 那条路仍在，只是不再默认）。
+
+**代价 / 边界**：
+
+- 下拉框依赖 `remote.session.modelCatalog()`：客户端半边通过 `ctx.inject(['remote', 'remote.session'])` 拿 `remote`（`ctx.get('remote')` 在 apply 阶段读不到服务，和 D18 同一个坑，实测表现为下拉框永远不出现）。
+- 列表里的路线若已不在目录中（改名/不可见），会作为「（当前值，不在模型目录里）」补在选项里，避免表单静默丢掉正在显示的配置。
+- 默认改成 `model` 后，**每一轮未 pin 的提问都会多一次小请求**（有超时与回落）。这是 D1 与 D17 之间的一次显式取舍：默认偏向准确，而不是偏向零成本。
+
+**真机验证**（全新 `dsh --profile webverify`——`dsh-base` + `dsh-web-app` + 本插件，避开当天坏掉的第三方客户端插件）：
+
+| 场景 | 结果 |
+|---|---|
+| 左侧导航 | 多出「自动思考强度」（模型之后、插件之前） |
+| 页面 | 渲染完整表单；`classifier` 默认选中 `model（一次小模型调用）` |
+| 模型下拉 | 选项 = 目录里的 `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp` +「（跟随会话模型）」 |
+| 保存 | 选中 `deepseek-official/deepseek-v4-flash` 保存 → `settings.yaml` 里出现该键；`autoFloorLevel: low` 同样写回 |
+
+**证据**：`src/client.js`（`SECTION_TITLE`、`createCatalog`、`ctx.inject(['remote','remote.session'])`）、`src/config.ts`（`classifier` 默认）、`cordis.patch.yml`、`tests/config.spec.ts`、`tests/wiring.spec.ts`（harness 基线改成 heuristic，模型后端用例显式 opt-in）。
 
 ---
 

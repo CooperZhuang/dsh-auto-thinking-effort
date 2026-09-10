@@ -26,8 +26,10 @@
 
 | `classifier` | 怎么决定 | 延迟/成本 |
 |---|---|---|
-| `heuristic`（默认） | 纯函数：正则规则加权 + 结构特征 | 0 |
-| `model` | **一次小模型调用**：把允许的档位和它们的说明写进系统提示，让模型只回一个词 | 每轮 +1 次小请求（可设硬超时） |
+| `model`（默认） | **一次小模型调用**：把允许的档位和它们的说明写进系统提示，让模型只回一个词 | 每轮 +1 次小请求（可设硬超时、失败回落） |
+| `heuristic` | 纯函数：正则规则加权 + 结构特征 | 0 |
+
+默认选 `model`，因为「读懂提问」比「读懂提问的形状」更准；它只回一个词、有硬超时、任何失败都回落到启发式，代价可控。想彻底零调用就把它设成 `heuristic`（`/` 设置页里的下拉或 `settings.yaml` 里一行）。
 
 模型后端的硬规则：
 
@@ -51,7 +53,7 @@
 ### 边界
 - **只改 `reasoningEffort`**。provider、model、system prompt、消息列表一律不动。最坏情况是"这轮想得多了/少了"，永远不会变成"另一段对话"。
 - **Auto 这个 id 绝不会发给模型**。它只是选择器里的一个标记；`agent/request` 在 `prepareCall` 之前就把它换成模型真正支持的档位。哪怕插件被 `enabled: false` 关掉，也留着一条"兜底改写"监听器，保证它不会漏到 provider 请求里。
-- **分类有两个后端，默认不调模型**。默认是纯函数（正则 + 结构特征）：零延迟、零成本、可单测、可复现；代价是它读的是**形状和用词**，不是语义。想让模型来判断，把 `classifier` 设成 `model`（下一节）。
+- **分类默认走一次小模型调用**（`classifier: model`）：它读懂的是问题本身，不是问题的形状；只回一个档位词、有硬超时、失败一律回落到纯函数启发式。想要零延迟零成本，把它设成 `heuristic` 即可（下一节）。
 - **Auto 不会污染全局默认**：插件拦掉 `agent-default-model.saveSelection` 里的 Auto，落盘的是"没有显式档位"。这样别的没装插件的 profile 读到的是 provider 默认，不会因为一个它们不认识的 id 而报错。
 
 ---
@@ -201,8 +203,8 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | `autoWhenUnset` | `true` | 请求上没有显式档位时是否也算自动。 |
 | `autoFloorLevel` | `minimal` | `auto` 允许的最低档位；默认就是阶梯最弱那档（= 可以关掉思考），设成 `low` 即禁止关思考。 |
 | `autoCeilingLevel` | `high` | **分数算出**的档位上限；pin 不受它约束。 |
-| `classifier` | `heuristic` | 分类后端：`heuristic`（默认，纯函数）或 `model`（一次小模型调用）。 |
-| `classifierModel` | `''` | 模型后端用的路线 `provider/model`；留空 = 用该会话自己的路线。 |
+| `classifier` | `model` | 分类后端：`model`（默认，一次小模型调用）或 `heuristic`（纯函数，零调用）。 |
+| `classifierModel` | `''` | 模型后端用的路线 `provider/model`；留空 = 跟随该会话自己的路线。设置页里是一个下拉框，选项 = 你已配置的模型。 |
 | `classifierTimeoutMs` | `8000` | 单次分类调用的硬超时（毫秒）。 |
 | `classifierMaxTokens` | `64` | 分类调用的输出上限（它只回一个词）。 |
 | `applyToSubagents` | `false` | 是否也管子代理会话（子代理通常由调用方指定路线，默认不动）。 |
@@ -237,13 +239,17 @@ auto-thinking-effort:
 - 插件**不依赖** `@deepseek-ai/dsh-settings`（接口是按结构声明的，见 `src/index.ts`）：没挂 settings provider 时它就只用 profile 那一行配置，照常工作。
 - 命名空间通过 `ctx.inject(['settings'])` 注册（服务要等提供它的 fiber 起来才读得到），所以 provider 晚于本插件挂载也没问题。
 
-### GUI 里的配置卡片
+### GUI：设置里的一页配置（自动思考强度）
 
-包自带浏览器半边（`src/client.js` → `lib/client.js`），向「插件」分区的 `settings.plugin.item` 槽注册一张卡片，key 就是本插件的 settings 命名空间——分区只负责把被服务的命名空间与同名卡片配对。
+包自带浏览器半边（`src/client.js` → `lib/client.js`），提供两个入口：
 
-卡片的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
+- **设置 → 自动思考强度**（左侧导航里独立的一项，排在「模型」后面）——一页完整的配置表单；
+- **设置 → 插件 → 插件配置**里的一张卡片（同一个表单，key 就是本插件的 settings 命名空间，分区只负责把被服务的命名空间与同名卡片配对）。
 
-- 草稿先暂存在卡片里，**保存**才写入；写入是一次原子 mutation，并用草稿开始时的 revision 设栅，别的界面并发改过就拒绕而不是静默覆盖。
+两个入口绑定同一个命名空间 scope，所以永远一致。表单的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
+
+- `classifierModel` 是**下拉框**，选项来自 host 的模型目录（`remote.session.modelCatalog`，和输入框旁边那个模型选择器同一份数据），所以「已配置好的模型」在两处含义一致；多出一个「（跟随会话模型）」= 不额外指定路线。模型目录拿不到时会自动退回可手填 `provider/model` 的文本框（并在下面说明原因）。
+- 草稿先暂存在表单里，**保存**才写入；写入是一次原子 mutation，并用草稿开始时的 revision 设栅，别的界面并发改过就拒绕而不是静默覆盖。
 - 字段出现在用户层就会标「已覆盖」；**重置** = 暂存一次清除，保存后该字段重新继承 profile 里的组装值。
 - `levels` / `rules` 这类结构化配置不在表单里（在 `settings.yaml` 手写）。
 
@@ -273,14 +279,14 @@ auto-thinking-effort:
 
 | 维度 | oh-my-pi | 本插件 |
 |---|---|---|
-| 分类方式 | **一次小模型调用**（`tiny`/`smol`，或本地 on-device <2B 模型），prompt 只让它回一个词 | **可配**：默认纯启发式（零调用），设 `classifier: model` 后同样走一次小模型调用 |
+| 分类方式 | **一次小模型调用**（`tiny`/`smol`，或本地 on-device <2B 模型），prompt 只让它回一个词 | **默认同样是一次小模型调用**（`classifier: model`，可用 `classifierModel` 指定路线）；想零调用就设 `classifier: heuristic` |
 | `auto` 住在哪 | agent 层自己的 selector，**永远不是 Effort**，provider 映射前就解析掉 | 注入进模型档位列表的合成档位（DSH 没有贡献扩展点） |
 | 下限 | 不低于 `low`（硬编码） | **默认无下限**（可以到 `off`），要收紧就设 `autoFloorLevel: low` |
 | 上限 | 默认 `xhigh`（差一档），只有 `ultrathink` 到 `max` | 默认 `high`，只有显式 pin 到 `max` |
 | 钳制 | 下限池内取不超过请求的最高档 | 已对齐（见上一节） |
 | 失败处理 | 抛错 → 回落到 provisional level，这一轮照常跑 | 无记录 → 默认带；请求路径永不抛 |
 
-**两边都有的**：模型分类后端。他们只有这一条路，我们把它做成可选项且默认关着——按 `docs/design.md` D1 把「零延迟、确定性、可复现」放在首位；打开后按 D17 的契约走：只在没有 pin 的轮次调用、`agent/pre-step` 发起并在 `agent/request` 等待、超时与失败一律回落到启发式。
+**两边都有的**：模型分类后端。他们只有这一条路，我们把它做成可关的（`classifier: heuristic` 即回到纯函数路径）。默认选 `model`，因为这一档位的意义就是「读懂提问」；设成 `heuristic` 后按 D1 的契约走：零延迟、确定性、可复现、可单测。打开时按 D17 的契约走：只在没有 pin 的轮次调用、`agent/pre-step` 发起并在 `agent/request` 等待、超时与失败一律回落到启发式。
 
 ---
 
@@ -340,9 +346,10 @@ auto-thinking-effort:
 | 真机：分类器失败不影响这一轮 | `classifierModel` 指向一个不存在的模型 | 请求照常发出，档位回落到启发式的 `high` | `session-718b1f73` |
 | **真机：`settings.yaml` 用户层生效（v0.6）** | `--patch` 把 `settings-file` 指到临时设置文件，里面只写 `auto-thinking-effort: { autoFloorLevel: low }`（profile 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `reasoningEffort: "low"`（profile 行单独跑同一句是 `"off"`） | `session-518c09e2` vs `session-3af16e67`；最终构建复核 `session-de9b7ee1` |
 | **真机：正在跑的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（全程未重启）：启动时文件里是 `autoCeilingLevel: max`，先改成 `high` 发一轮，再改回 `max` 发同一轮 | 同一进程内 `request/header` 随文件变化（`high` / `max`）；provider 自己的默认是 `high`，所以 `max` 只可能来自插件 | `session-0f47f1c6` / `session-b7f7a469`；最终构建复核（启动值为 `high`，改文件后拿到 `max`）`session-ce7ffac5` |
-| **真机：GUI 配置卡片（v0.6）** | 全新 `dsh --profile web --port 0` 进程，在「设置 → 插件 → 插件配置」里找到本插件卡片并展开 | 13 个字段渲染正确（base 值与「已覆盖」标记都对），与官方卡片并列 | 见 `docs/design.md` D19 |
-| **真机：卡片保存 → host 采纳** | 同一进程内用卡片把 `autoFloorLevel` 改成 `low` 并保存，然后新会话发 `git status` | `settings.yaml` 写入成功；该轮 `request/header` = `"low"`（base 行单独跑同句是 `"off"`） | `session-b340648b` |
-| **真机：卡片重置 = 清除覆盖** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 `minimal`） | 同一 scratch 设置文件 |
+| **真机：设置里独立的一页（v0.6）** | 全新 `dsh --profile web --port 0` 进程，打开「设置」 | 左侧导航多出「自动思考强度」（排在「模型」之后），点开是完整表单；`classifier` 默认选中 `model` | `docs/design.md` D19/D20 |
+| **真机：`classifierModel` 下拉** | 同一进程，展开该字段 | 选项 = host 模型目录里的已配置模型（`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp`）+「（跟随会话模型）」；选中一个保存后 `settings.yaml` 写入 `classifierModel: deepseek-official/deepseek-v4-flash` | 同一 scratch 设置文件 |
+| **真机：表单保存 → host 采纳** | 同一进程内把 `autoFloorLevel` 改成 `low` 并保存，然后新会话发 `git status` | `settings.yaml` 写入成功；该轮 `request/header` = `"low"`（base 行单独跑同句是 `"off"`） | `session-b340648b` |
+| **真机：重置 = 清除覆盖** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 `minimal`） | 同一 scratch 设置文件 |
 
 **只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts`，用的是真的 cordis Context、真的 `installModelSelection`、真的 waterfall 分发器，且**故意让 selection 监听器先注册**）：
 

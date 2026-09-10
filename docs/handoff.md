@@ -8,13 +8,13 @@
 ## 0. 一句话现状
 
 插件 **v0.6.0**：在选择器里加了一个 **Auto** 档位，选中后每轮自动切 effort；手动档位（off/low/high/max）原样保留、插件不插手。
-分类有**两个后端**：默认纯启发式（零调用），`classifier: model` 时改用一次小模型调用（有超时、失败回落、pin 优先）。
+分类有**两个后端**，**默认是 `model`**（一次小模型调用；有超时、失败回落、pin 优先），`heuristic` 是随时可切回的零调用路径（D20）。
 边界可配：**下限默认不设（可以到 `off`）**、**分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）**、pin 只在正文匹配、钳制从下限一侧回答（见 `docs/design.md` D13–D17）。
-v0.6 新增：① 插件注册了一个 settings 命名空间 `auto-thinking-effort`，**profile 行是 base 层、`~/.dsh/settings.yaml` 同名段是用户层（优先且热生效）** —— 改完不用重启 `dsh web`（D18）；② 包**自带了浏览器半边**：在「设置 → 插件 → 插件配置」里有一张可编辑的「自动档位 Auto」卡片，保存即写入并即时生效（D19）。
-已单测（123 个）、已真机验证（真实 web profile 的 GUI、模型分类 A/B、下限两侧、settings 用户层、**同一进程内热重配**、**GUI 配置卡片：保存 / host 采纳 / 重置**）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
+v0.6 新增：① 插件注册了一个 settings 命名空间 `auto-thinking-effort`，**profile 行是 base 层、`~/.dsh/settings.yaml` 同名段是用户层（优先且热生效）** —— 改完不用重启 `dsh web`（D18）；② 包**自带了浏览器半边**：**设置 → 自动思考强度**是一整页独立配置（左侧导航里排在「模型」之后），「设置 → 插件 → 插件配置」里另有一张同表单的卡片；`classifierModel` 是从本机模型目录来的下拉框（D19/D20）。
+已单测（123 个）、已真机验证（真实 web profile 的 GUI、模型分类 A/B、下限两侧、settings 用户层、**同一进程内热重配**、**设置页：出现 / 下拉 / 保存 / host 采纳 / 重置**）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
-**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。同文件的 `auto-thinking-effort:` 段写了 `classifier: model` + `classifierModel: deepseek-official/deepseek-v4-flash` + `autoFloorLevel: minimal` + `autoCeilingLevel: high`；`web` profile 的 `cordis.patch.yml` 里那条 `auto-thinking-effort` 覆盖行（同样把分类后端设成 model）**保留作为 base 层**，兼顾旧版本。注意：用户当前跑着的 `dsh web` **还需要再重启一次**才会加载浏览器半边（bundle 与客户端 bundle 都不热加载；重启后「设置 → 插件 → 插件配置」里就会出现配置卡片，之后改卡片或 settings.yaml 都是即时生效）。
+**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。同文件的 `auto-thinking-effort:` 段写了 `classifier: model` + `classifierModel: deepseek-official/deepseek-v4-flash` + `autoFloorLevel: minimal` + `autoCeilingLevel: high`；`web` profile 的 `cordis.patch.yml` 里那条 `auto-thinking-effort` 覆盖行（同样把分类后端设成 model）**保留作为 base 层**，兼顾旧版本。注意：用户当前跑着的 `dsh web` **还需要再重启一次**才会加载浏览器半边（bundle 与客户端 bundle 都不热加载；重启后左侧导航就会出现「自动思考强度」）。**⚠ 重启前先看 §6 陷阱 14：用户 `web` profile 里有一个第三方客户端插件会让整个客户端 boot 失败。**
 ---
 
 ## 1. 这个项目要做什么
@@ -111,7 +111,9 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | **真机：settings 用户层在加载期被读到（v0.6）** | `--patch` 把 `settings-file` 指到 `.verify/settings-user-layer.yaml`（只有用户层写 `autoFloorLevel: low`，base 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `"low"`（base 单独跑同句是 `"off"`） | `session-518c09e2` vs `session-3af16e67` |
 | **真机：跑着的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（PID 18604，10:03:40 启动，全程未重启），对同一句 `why does the whole codebase deadlock? prove the invariant.`：文件里先 `autoCeilingLevel: max`，改成 `high` 后再发一次，再改回 `max` 又发一次 | 同一进程内 `request/header` 随文件变化（provider 自己的默认是 `high`，因此 `max` 只可能来自插件） | `session-0f47f1c6`（high） / `session-b7f7a469`（max）；最终构建单点复核 `session-ce7ffac5`（max） |
 | **真机：GUI 配置卡片出现在「设置 → 插件 → 插件配置」（v0.6）** | 全新 `dsh --profile web --port 0` 进程（1329），浏览器打开并进入插件配置页 | 卡片与官方卡片并列，展开后 13 个字段全渲染；base 值（classifier=model 等）与用户层覆盖标记（`autoCeilingLevel: max` 带「已覆盖」+「重置」）都对 | `docs/design.md` D19；启动图里 `dsh-auto-thinking-effort` 客户端 bundle 已入图 |
-| **真机：卡片保存 → 运行中的 host 采纳（v0.6）** | 同一进程内用卡片把 `autoFloorLevel` 改成 `low` 保存，然后新会话发 `git status` | `settings.yaml` 写入成功（注释/其它段未动）；该轮 `request/header` = `"low"`（base 行单独跑同句是 `"off"`） | `session-b340648b` |
+| **真机：设置页里独立的一项（v0.6.0）** | 全新 `dsh --profile webverify`（`dsh-base` + `dsh-web-app` + 本插件，绕开坏掉的第三方客户端插件），打开「设置」 | 左侧导航出现「自动思考强度」（「模型」之后、「插件」之前），点开是完整表单；`classifier` 默认选中 `model` | `docs/design.md` D19/D20 |
+| **真机：`classifierModel` 下拉（v0.6.0）** | 同一进程展开该字段，并选一个保存 | 选项 = 本机模型目录的 4 个模型 +「（跟随会话模型）」；保存后 `settings.yaml` 写入 `classifierModel: deepseek-official/deepseek-v4-flash` | 同一 scratch 设置文件 |
+| **真机：热重配（v0.6，含设置页写入）** | 同上进程：表单里 `autoFloorLevel: low` 保存 → 新会话 `git status` | 文件写入 + `request/header` = `"low"`（base 单独跑同句是 `"off"`） | `session-b340648b` |
 | **真机：卡片「重置」= 清除覆盖（v0.6）** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 base 的 `minimal`） | 同一 scratch 设置文件 |
 
 > 这两次比对用 `--patch` 把 `settings-file` 指向 `.verify/settings-verify.yaml`（临时设置，默认档位不带 effort），否则用户当前的 `reasoningEffort: high` 会让会话走手动档、插件根本不介入。
@@ -157,6 +159,8 @@ node scripts\inspect-session.mjs <session-dir> --grep "request/header"
 11. **GUI 里选档位会写全局默认**：`selectModel` 末尾会 `agentDefaultModel.saveSelection(...)`。这正是 D12 那道守卫存在的原因——**别删**。
 12. **cordis 里 `ctx.get(name)` 读不到“fiber 还没 active”的服务**（而 DSH 的 settings provider 正是异步读完文档的）；要用 `ctx.inject([...], cb)`。第一版用 `ctx.get('settings')` 真机**静默失效**：用户层写了 `autoFloorLevel: low`，跑出来还是 `off`，唯一线索是“把一个非法值写进去也不报错”（如果真注册了，`validate` 会当场拒统）。排查手法记一下：**拿一个必然非法的值去戳，看有没有声音**。
 13. **手改 `~/.dsh/settings.yaml` 时别把下一段的 key 吃掉**：这次差点把 `dsh-better-sidebar:` 这行删成注释，结果整个 sidebar 的键被归到本插件命名空间下。改完用真 yaml 解析器验一下（`yaml.parseDocument(...).errors` + 打印 section 名），因为 settings provider 只会觉得“这一段多了一些键”。
+14. **一个坏的第三方客户端插件会让整个 GUI 白屏**（2026-09-10 实测）：用户 `web` profile 里的 `@kenz1117/dsh-ui-usage-billing@1.1.12`（12:03 装/更新的）客户端 bundle `require("@deepseek-ai/dsh-client-runtime/client")`，而这个 specifier 既不在平台 seed 表、也不是已注册的包 factory → 客户端 boot 直接 `Failed to load plugins`，**所有插件的卡片/设置页（包括本插件）都不出现**。重新起一个 `dsh --profile web` 就能复现（错误里的 entry id 每次不同，是本页 nonce）。处理：卸掉或等上游修；**验证本插件时用一个干净 profile**（下面 §8 的 `webverify` 配方），别把这种环境故障当成插件的问题。
+15. **验证客户端半边要一个新进程 + 干净 profile**：`dsh --profile web --port 0` 起第二个实例即可（会和用户的 3080 共用 `~/.dsh`，但 `--patch` 能把 `settings-file` 指到 scratch 文件，不碰真设置）；如果用户的 profile 里有坏插件，改用 §8 的三行配方建一个只装 `dsh-base` + `dsh-web-app` + 本插件的 `webverify`。
 
 ---
 
@@ -190,6 +194,12 @@ dsh plugin --profile web remove dsh-auto-thinking-effort
 dsh --profile headless "谢谢"
 dsh --profile headless "深入思考一下：为什么…"
 
+# 验证客户端半边（设置页/卡片）：干净 profile 三行配方（用户 profile 有坏插件时用）
+#   1) 建 C:\Users\Cooper\.dsh\profiles\webverify\package.json，dsh.profile.bundles = [@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-auto-thinking-effort]
+#   2) dsh plugin --profile webverify add C:\CodeRepository\dsh-auto-thinking-effort
+#   3) dsh --profile webverify --patch .verify/hot.yml --port 0 --no-open
+#   → 打开日志里的 URL，设置里就应出现「自动思考强度」；验证完删掉该 profile 目录即可
+
 # 只看判定不改请求：加 --patch 覆盖 dryRun: true（模板见 .verify/）
 ```
 
@@ -200,13 +210,13 @@ dsh --profile headless "深入思考一下：为什么…"
 - [x] 代码 + 单测（116 个）+ CI workflow
 - [x] Auto 档位注入（D10）与「手动优先」（D11）与全局默认守卫（D12）
 - [x] 边界策略对齐 oh-my-pi（D13 下限 / D14 上限 / D15 pin 只在正文 / D16 钳制方向）
-- [x] **可选模型分类后端**（D17）：`classifier: heuristic|model`，真机 A/B 验证
+- [x] **可选模型分类后端**（D17，v0.6.0 起为默认；D20）：`classifier: heuristic|model`，真机 A/B 验证
 - [x] 真机挂载与请求头证据（含对照组）
 - [x] **GUI 真机验证**：Auto 出现并可选中、每轮自动、手动不被覆盖、默认不被污染
 - [x] v0.3 / v0.4 真机证据（下限 / pin 越天花板 / 天花板挡高分 / 模型分类 A/B / 分类失败回落）
 - [x] 装进用户的 `web` profile（bundle 已追加；重启后生效）
-- [x] **浏览器半边 + GUI 配置卡片（D19）**：真机验证「卡片出现 / 保存写入 / host 采纳 / 重置」四步（用户需再重启一次 `dsh web` 才看得到）
-- [x] 设计决策与证据位置（`docs/design.md` D1–D19）
+- [x] **浏览器半边 + 设置里独立一页（D19/D20）**：真机验证「导航出现 / 表单渲染 / 下拉 / 保存写入 / host 采纳 / 重置」（用户重启 `dsh web` 后即可看到；注意 §6 陷阱 14 的环境故障）
+- [x] 设计决策与证据位置（`docs/design.md` D1–D20）
 - [x] **settings 命名空间 + 热重配（D18）**：真机验证用户层生效与同一进程内热重配；用户 `web` profile 与 `~/.dsh/settings.yaml` 已接好
 - [x] 中英 README，含「真机验证 / 仅单测 / 未验证」三张表 + oh-my-pi 对比表
 - [ ] 真实子代理跳过验证（U2）

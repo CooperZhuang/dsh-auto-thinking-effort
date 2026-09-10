@@ -27,6 +27,7 @@ describe('Config defaults', () => {
     expect(config.logDecisions).toBe(true)
     expect(config.classifier).toBe('model')
     expect(config.classifierModel).toBe('')
+    expect(config.classifierEffort).toBe('off')
     expect(config.classifierTimeoutMs).toBe(8_000)
     expect(config.classifierMaxTokens).toBe(64)
     expect(config.maxChars).toBe(8_000)

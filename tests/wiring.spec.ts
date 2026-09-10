@@ -36,7 +36,7 @@ function fakeLlm(efforts: readonly string[] | null, classifierAnswer?: string | 
     name: model,
     ...efforts === null ? {} : { reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } },
   })
-  const calls = { classifier: 0, lastSystem: '' }
+  const calls = { classifier: 0, lastSystem: '', lastEffort: undefined as string | undefined }
   return {
     resolveModelInfo,
     calls,
@@ -52,6 +52,7 @@ function fakeLlm(efforts: readonly string[] | null, classifierAnswer?: string | 
     async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
       calls.classifier += 1
       calls.lastSystem = options.system ?? ''
+      calls.lastEffort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
       if (classifierAnswer === null) {
         yield { type: 'finish', reason: { kind: 'error' } } as unknown as StreamChunk
         return
@@ -135,6 +136,8 @@ interface Harness {
   classifierCalls(): number
   /** The system prompt of the last classifier call. */
   classifierPrompt(): string
+  /** The reasoning effort the last classifier call asked for, if any. */
+  classifierEffort(): string | undefined
   /** The synthetic gear the fake route advertises right now, if any. */
   gear(): Promise<string | undefined>
   /**
@@ -224,6 +227,7 @@ function harness(options: HarnessOptions = {}): Harness {
     },
     classifierCalls: () => (llm as unknown as { calls: { classifier: number } }).calls.classifier,
     classifierPrompt: () => (llm as unknown as { calls: { lastSystem: string } }).calls.lastSystem,
+    classifierEffort: () => (llm as unknown as { calls: { lastEffort: string | undefined } }).calls.lastEffort,
     async gear() {
       await settled
       const info = await llm.resolveModelInfo('fake', 'fake-1')
@@ -356,6 +360,31 @@ describe('model classifier', () => {
     expect(h.classifierPrompt()).toContain('`low`')
     expect(h.classifierPrompt()).toContain('`high`')
     expect(h.classifierPrompt()).not.toContain('`max`')
+  })
+
+  it('sends the classifier call with thinking off by default', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('git status')])
+    await h.request(1)
+    // The classifier answers from the text, it does not think about the text:
+    // `off` is the shipped default (D21), so it can never be the most
+    // expensive call of the turn.
+    expect(h.classifierEffort()).toBe('off')
+  })
+
+  it('lets the classifier think when an effort is configured', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { ...MODEL, classifierEffort: 'high' }, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('git status')])
+    await h.request(1)
+    expect(h.classifierEffort()).toBe('high')
+  })
+
+  it('falls back to the route\'s weakest rung when the effort is blank', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { ...MODEL, classifierEffort: '' }, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('git status')])
+    await h.request(1)
+    // The fake route declares off/low/high/max, so the weakest declared rung wins.
+    expect(h.classifierEffort()).toBe('off')
   })
 
   it('answers a gear request from the model classification too', async () => {

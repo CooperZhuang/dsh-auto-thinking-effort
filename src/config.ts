@@ -60,6 +60,14 @@ export interface ConfigShape {
    * route. Point it at a small, fast model.
    */
   classifierModel: string
+  /**
+   * Reasoning effort for the classifier's **own** call. The default is `off`:
+   * the classifier answers from the text, it does not think about the text, so
+   * it can never become the slowest and most expensive call of a turn (D21).
+   * Set it to a rung the route declares to let it think, or to `''` to fall
+   * back to the route's weakest declared rung.
+   */
+  classifierEffort: string
   /** Hard deadline for one classifier call, in milliseconds. */
   classifierTimeoutMs: number
   /** Output cap for the classifier call. */
@@ -86,6 +94,7 @@ export const Config: z<ConfigShape> = z.object({
   })).default([]),
   classifier: z.union(['heuristic', 'model'] as const).default('model'),
   classifierModel: z.string().default(''),
+  classifierEffort: z.string().default('off'),
   classifierTimeoutMs: z.number().default(8_000),
   classifierMaxTokens: z.number().default(64),
   builtinRules: z.boolean().default(true),
@@ -159,6 +168,12 @@ export function prepareConfig(config: ConfigShape): PreparedConfig {
   }
   if (config.classifierModel.trim() !== '' && !config.classifierModel.includes('/')) {
     throw new TypeError(`auto-thinking-effort: classifierModel must be "provider/model", got ${JSON.stringify(config.classifierModel)}`)
+  }
+  // `classifierEffort` is a provider-route rung, not a ladder level: only the
+  // exact route can judge it, and an unsupported rung is a hard request error
+  // rather than something to clamp. So the only shape check is "non-blank".
+  if (config.classifierEffort.trim() === '' && config.classifierEffort !== '') {
+    throw new TypeError('auto-thinking-effort: classifierEffort must be an effort id, or "" for the route\'s weakest rung')
   }
   if (!Number.isInteger(config.classifierTimeoutMs) || config.classifierTimeoutMs < 250) {
     throw new RangeError(`auto-thinking-effort: classifierTimeoutMs must be an integer >= 250, got ${String(config.classifierTimeoutMs)}`)

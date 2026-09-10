@@ -62,6 +62,12 @@
       hint: '从你已配置的模型里选一个「小而快」的；「跟随会话模型」= 用当前会话自己的路线（不额外指定）。',
     },
     {
+      key: 'classifierEffort',
+      kind: 'effort',
+      label: '分类模型的思考档位 classifierEffort',
+      hint: '分类模型自己的档位，不是被判定那一轮的档位。默认 off = 它不思考、只回一个词，所以永远不会成为这一轮最贵的一次调用。',
+    },
+    {
       key: 'autoFloorLevel',
       kind: 'level',
       label: '下限 autoFloorLevel',
@@ -219,6 +225,27 @@
   }
 
   /**
+   * The effort ids a classifier-effort select offers.
+   *
+   * The stored value is an effort an adapter route declares, not a level id, so
+   * it cannot be derived from the ladder. Instead the field offers the efforts
+   * the *configured ladder* asks for — the rungs this deployment actually uses —
+   * plus the empty value meaning "whatever the classifier route's weakest rung
+   * is". A stored value outside that set is appended so the form shows it.
+   *
+   * @param levels - the configured ladder.
+   * @param shown - the value currently in the field.
+   * @returns the option values, including the empty one.
+   */
+  function effortOptions(levels, shown) {
+    const known = []
+    for (const level of levels) if (!known.includes(level.effort)) known.push(level.effort)
+    const options = ['', ...known]
+    if (shown !== '' && !options.includes(shown)) options.push(shown)
+    return options
+  }
+
+  /**
    * The option values a bound select offers.
    * @param source - the field spec.
    * @param levels - the configured level ids.
@@ -351,6 +378,14 @@
           type: 'text',
           value: shown,
         })
+      } else if (source.kind === 'effort') {
+        control = h('select', {
+          disabled,
+          onChange: (event) => { onStage(event.target.value) },
+          style: styles.control,
+          value: shown,
+        }, effortOptions(levels, shown).map((option) => h('option', { key: option, value: option },
+          option === '' ? '（该路线的最弱档）' : option)))
       } else if (optionsFor(source, levels) === undefined) {
         control = h('input', {
           disabled,

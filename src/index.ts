@@ -339,7 +339,7 @@ function buildRuntime(config: ConfigShape): Runtime {
 function describeRuntime(runtime: Runtime): string {
   const { config, prepared } = runtime
   const classifier = config.classifier === 'model'
-    ? `model${config.classifierModel.trim() === '' ? '' : ` (${config.classifierModel})`}`
+    ? `model${config.classifierModel.trim() === '' ? '' : ` (${config.classifierModel})`}/effort ${config.classifierEffort === '' ? 'weakest' : config.classifierEffort}`
     : 'heuristic'
   return `gear ${config.autoEffortId}, levels [${prepared.levels.map((level) => `${level.id}→${level.effort}`).join(' ')}], `
     + `${String(prepared.rules.length)} rule(s), bounds ${prepared.floor.id}..${prepared.ceiling.id}, `
@@ -622,14 +622,20 @@ function startClassification(args: StartClassificationArgs): Promise<ClassifierA
   if (cached !== undefined) return Promise.resolve({ level: cached, route: routeLabel })
 
   return (async (): Promise<ClassifierAnswer | undefined> => {
+    // The classifier's own effort, resolved before the call: pinned to the
+    // configured one when there is one, otherwise the weakest rung the route
+    // declares. It must never think its way to an answer — see `D21`.
     const rungs = await supportedEfforts(args, route.provider, route.model)
+    const effort = config.classifierEffort.trim() !== ''
+      ? config.classifierEffort
+      : rungs === undefined ? undefined : weakestRung(prepared.levels, rungs)
     const answer = await runModelClassifier({
       ctx: args.ctx,
       route,
       sessionId: args.agent.session.id,
       text: args.text,
       levels,
-      effort: rungs === undefined ? undefined : weakestRung(prepared.levels, rungs),
+      effort,
       maxChars: config.maxChars,
       maxTokens: config.classifierMaxTokens,
       timeoutMs: config.classifierTimeoutMs,

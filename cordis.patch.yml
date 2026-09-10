@@ -102,5 +102,12 @@
         # Route for that call, `provider/model`; empty reuses the agent's own
         # route at request time. Point it at a small, fast model.
         classifierModel: ''
+        # Reasoning effort for the CLASSIFIER's own call. `off` means the
+        # classifier does not think about its answer: it reads the request and
+        # replies with one word, the cheapest call it can be, so it is never
+        # the most expensive thing in a turn. Set it to a rung the route
+        # declares to let it think, or to '' to fall back to that route's
+        # weakest declared rung.
+        classifierEffort: off
         classifierTimeoutMs: 8000
         classifierMaxTokens: 64

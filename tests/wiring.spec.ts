@@ -15,7 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { LlmCallConfig, LlmRuntime, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, LlmRuntime, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
@@ -25,15 +25,21 @@ import { apply } from '../src/index.ts'
 const GEAR = 'auto'
 
 /** A fake route declaring `efforts`, or no reasoning capability at all when `null`. */
-function fakeLlm(efforts: readonly string[] | null): LlmRuntime {
+/**
+ * A fake route. `classifierAnswer` makes the fake answer the optional model
+ * classifier; `null` makes that call fail with a terminal error finish.
+ */
+function fakeLlm(efforts: readonly string[] | null, classifierAnswer?: string | null): LlmRuntime {
   const resolveModelInfo = async (provider: string, model: string) => ({
     provider,
     id: model,
     name: model,
     ...efforts === null ? {} : { reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } },
   })
+  const calls = { classifier: 0, lastSystem: '' }
   return {
     resolveModelInfo,
+    calls,
     // The real service validates an explicit effort against the adapter's
     // declared rungs; the plugin's capability wrapper makes the gear acceptable.
     resolveCallConfig: async (config: LlmCallConfig) => {
@@ -42,6 +48,16 @@ function fakeLlm(efforts: readonly string[] | null): LlmRuntime {
         throw new Error(`does not support reasoning effort "${requested}"`)
       }
       return config
+    },
+    async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      calls.classifier += 1
+      calls.lastSystem = options.system ?? ''
+      if (classifierAnswer === null) {
+        yield { type: 'finish', reason: { kind: 'error' } } as unknown as StreamChunk
+        return
+      }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: classifierAnswer ?? '' } } as StreamChunk
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
     },
   } as unknown as LlmRuntime
 }
@@ -65,11 +81,17 @@ interface HarnessOptions {
   selection?: boolean
   /** The effort the session's model selection carries. */
   selectedEffort?: string | undefined
+  /** What the fake classifier model answers; `null` makes that call fail. */
+  classifierAnswer?: string | null
 }
 
 interface Harness {
   request(turn: number, step?: number, seed?: LlmCallConfig): Promise<LlmCallConfig>
   preStep(turn: number, messages: readonly UserMessage[], step?: number): Promise<void>
+  /** How many classifier calls the fake route served. */
+  classifierCalls(): number
+  /** The system prompt of the last classifier call. */
+  classifierPrompt(): string
 }
 
 /**
@@ -80,10 +102,15 @@ interface Harness {
  */
 function harness(options: HarnessOptions = {}): Harness {
   const ctx = new Context()
-  ctx.provide('llm', fakeLlm(options.efforts === undefined ? ['off', 'low', 'high', 'max'] : options.efforts))
+  const llm = fakeLlm(
+    options.efforts === undefined ? ['off', 'low', 'high', 'max'] : options.efforts,
+    options.classifierAnswer === undefined ? 'high' : options.classifierAnswer,
+  )
+  ctx.provide('llm', llm)
 
   const agent = {
     id: 'session-1',
+    options: { provider: 'fake', model: 'fake-1' },
     session: {
       id: 'session-1',
       header: options.subagent === true ? { origin: 'subagent' } : {},
@@ -123,6 +150,8 @@ function harness(options: HarnessOptions = {}): Harness {
     async request(turn, step = 1, seed = { provider: 'fake', model: 'fake-1', reasoningEffort: ReasoningEffortId(GEAR) }) {
       return await dispatch.waterfall('agent/request', { turn, step, signal }, () => Promise.resolve(seed))
     },
+    classifierCalls: () => (llm as unknown as { calls: { classifier: number } }).calls.classifier,
+    classifierPrompt: () => (llm as unknown as { calls: { lastSystem: string } }).calls.lastSystem,
   }
 }
 
@@ -200,6 +229,61 @@ describe('Auto gear', () => {
     const h = harness({ selectedEffort: GEAR, config: { dryRun: true } })
     await h.preStep(1, [userMessage('think hard')])
     expect((await h.request(1)).reasoningEffort).toBe(GEAR)
+  })
+})
+
+describe('model classifier', () => {
+  const MODEL = { classifier: 'model' as const }
+
+  it('lets the model decide instead of the heuristics', async () => {
+    // The heuristics would score `git status` into the lowest band; the model
+    // says high, and the model wins.
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('git status')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+    expect(h.classifierCalls()).toBe(1)
+  })
+
+  it('still keeps a pinned turn away from the classifier', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'low' })
+    await h.preStep(1, [userMessage('ultrathink about the deadlock')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
+    expect(h.classifierCalls()).toBe(0)
+  })
+
+  it('keeps the heuristic level when the classifier call fails', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: null })
+    await h.preStep(1, [userMessage('git status')])
+    expect((await h.request(1)).reasoningEffort).toBe('low')
+  })
+
+  it('ignores an answer the parser cannot read', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'I cannot tell' })
+    await h.preStep(1, [userMessage('git status')])
+    expect((await h.request(1)).reasoningEffort).toBe('low')
+  })
+
+  it('offers the model only the levels inside the floor and ceiling', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('git status')])
+    await h.request(1)
+    // The default bounds are low..high, so `max` is never offered to the model.
+    expect(h.classifierPrompt()).toContain('`low`')
+    expect(h.classifierPrompt()).toContain('`high`')
+    expect(h.classifierPrompt()).not.toContain('`max`')
+  })
+
+  it('answers a gear request from the model classification too', async () => {
+    const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'high' })
+    await h.preStep(1, [userMessage('谢谢')])
+    expect((await h.request(1)).reasoningEffort).toBe('high')
+  })
+
+  it('does not call the classifier when the heuristics are selected', async () => {
+    const h = harness({ selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('git status')])
+    await h.request(1)
+    expect(h.classifierCalls()).toBe(0)
   })
 })
 

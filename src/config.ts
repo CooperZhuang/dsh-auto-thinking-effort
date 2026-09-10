@@ -48,6 +48,17 @@ export interface ConfigShape {
   autoFloorLevel: string
   /** Highest level a score-derived auto decision may reach (pins bypass it). */
   autoCeilingLevel: string
+  /** Which backend decides the level: the shipped heuristics, or a model call. */
+  classifier: 'heuristic' | 'model'
+  /**
+   * `provider/model` the model classifier calls; empty reuses the request's own
+   * route. Point it at a small, fast model.
+   */
+  classifierModel: string
+  /** Hard deadline for one classifier call, in milliseconds. */
+  classifierTimeoutMs: number
+  /** Output cap for the classifier call. */
+  classifierMaxTokens: number
   /** Whether subagent child sessions are classified too. */
   applyToSubagents: boolean
   /** Keep the previous level when a message only asks to continue. */
@@ -66,7 +77,12 @@ export const Config: z<ConfigShape> = z.object({
     id: z.string(),
     effort: z.string(),
     maxScore: z.number().required(false),
+    description: z.string().required(false),
   })).default([]),
+  classifier: z.union(['heuristic', 'model'] as const).default('heuristic'),
+  classifierModel: z.string().default(''),
+  classifierTimeoutMs: z.number().default(8_000),
+  classifierMaxTokens: z.number().default(64),
   builtinRules: z.boolean().default(true),
   rules: z.array(z.object({
     pattern: z.string(),
@@ -132,6 +148,18 @@ export function prepareConfig(config: ConfigShape): PreparedConfig {
   }
   if (config.autoEffortName.trim() === '') {
     throw new TypeError('auto-thinking-effort: autoEffortName must not be empty')
+  }
+  if (config.classifier !== 'heuristic' && config.classifier !== 'model') {
+    throw new TypeError(`auto-thinking-effort: classifier must be "heuristic" or "model", got ${JSON.stringify(config.classifier)}`)
+  }
+  if (config.classifierModel.trim() !== '' && !config.classifierModel.includes('/')) {
+    throw new TypeError(`auto-thinking-effort: classifierModel must be "provider/model", got ${JSON.stringify(config.classifierModel)}`)
+  }
+  if (!Number.isInteger(config.classifierTimeoutMs) || config.classifierTimeoutMs < 250) {
+    throw new RangeError(`auto-thinking-effort: classifierTimeoutMs must be an integer >= 250, got ${String(config.classifierTimeoutMs)}`)
+  }
+  if (!Number.isInteger(config.classifierMaxTokens) || config.classifierMaxTokens < 1) {
+    throw new RangeError(`auto-thinking-effort: classifierMaxTokens must be a positive integer, got ${String(config.classifierMaxTokens)}`)
   }
   const known = new Set(levels.map((level) => level.id))
   const strongest = (levels[levels.length - 1] as LevelSpec).id

@@ -1,6 +1,6 @@
 {
   "name": "dsh-auto-thinking-effort",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH plugin: an Auto reasoning-effort gear that picks the level per turn from the user's question, while manual gears stay manual.",
   "type": "module",
   "repository": {

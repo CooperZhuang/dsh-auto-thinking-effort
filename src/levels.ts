@@ -29,14 +29,39 @@ export interface LevelSpec {
    * high; the highest level omits `maxScore` and catches every remaining score.
    */
   maxScore?: number
+  /**
+   * What this level means, in one line. Heuristics ignore it; the optional
+   * model classifier renders it into its prompt, so a custom ladder still
+   * describes itself to the model.
+   */
+  description?: string
 }
 
 /** The shipped ladder: DeepSeek's four efforts, low to high. */
 export const DEFAULT_LEVELS: readonly LevelSpec[] = Object.freeze([
-  Object.freeze({ id: 'minimal', effort: 'off', maxScore: -6 }),
-  Object.freeze({ id: 'low', effort: 'low', maxScore: -2 }),
-  Object.freeze({ id: 'high', effort: 'high', maxScore: 11 }),
-  Object.freeze({ id: 'max', effort: 'max' }),
+  Object.freeze({
+    id: 'minimal',
+    effort: 'off',
+    maxScore: -6,
+    description: 'trivial or mechanical — rename, typo, one-line edit, formatting, a direct factual question',
+  }),
+  Object.freeze({
+    id: 'low',
+    effort: 'low',
+    maxScore: -2,
+    description: 'light — a small self-contained change, a one-place fix, or explaining a short piece of code',
+  }),
+  Object.freeze({
+    id: 'high',
+    effort: 'high',
+    maxScore: 11,
+    description: 'non-trivial — multiple files or callers, real debugging, a moderate design decision',
+  }),
+  Object.freeze({
+    id: 'max',
+    effort: 'max',
+    description: 'deep or open-ended — subtle concurrency or algorithmic reasoning, hard root-cause work, a risky refactor',
+  }),
 ])
 
 /** A resolved effort plus whether clamping changed the requested rung. */
@@ -111,6 +136,28 @@ export function effortLadder(levels: readonly LevelSpec[]): string[] {
   const ladder: string[] = []
   for (const level of levels) if (!ladder.includes(level.effort)) ladder.push(level.effort)
   return ladder
+}
+
+/**
+ * Pick the weakest rung a route declares, by ladder order.
+ *
+ * Used for the classifier's own call: it should cost as little thinking as the
+ * route allows, and "as little as it allows" is an adapter-owned question.
+ * Declared rungs the ladder cannot rank sort last, so a known rung always wins.
+ *
+ * @param levels - the validated ladder.
+ * @param supported - effort ids the exact route declares.
+ * @returns the weakest declared rung, or `undefined` when none is rankable.
+ */
+export function weakestRung(levels: readonly LevelSpec[], supported: readonly string[]): string | undefined {
+  const ladder = effortLadder(levels)
+  let best: { effort: string; position: number } | undefined
+  for (const effort of supported) {
+    const position = ladder.indexOf(effort)
+    if (position < 0) continue
+    if (best === undefined || position < best.position) best = { effort, position }
+  }
+  return best?.effort
 }
 
 /**

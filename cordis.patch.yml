@@ -70,3 +70,13 @@
         # Score-derived decisions stay one rung below the top; only an explicit
         # pin (`ultrathink` / `深入思考`) reaches `max`.
         autoCeilingLevel: high
+        # Which backend decides the level: the shipped heuristics (default), or a
+        # cheap model call that reads the request and answers with one level id.
+        # The model backend always falls back to the heuristic decision on any
+        # failure, so it can never fail a turn.
+        classifier: heuristic
+        # Route for that call, `provider/model`; empty reuses the agent's own
+        # route at request time. Point it at a small, fast model.
+        classifierModel: ''
+        classifierTimeoutMs: 8000
+        classifierMaxTokens: 64

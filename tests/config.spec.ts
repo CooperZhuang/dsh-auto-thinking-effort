@@ -25,6 +25,10 @@ describe('Config defaults', () => {
     expect(config.autoFloorLevel).toBe('low')
     expect(config.autoCeilingLevel).toBe('high')
     expect(config.logDecisions).toBe(true)
+    expect(config.classifier).toBe('heuristic')
+    expect(config.classifierModel).toBe('')
+    expect(config.classifierTimeoutMs).toBe(8_000)
+    expect(config.classifierMaxTokens).toBe(64)
     expect(config.maxChars).toBe(8_000)
     expect(config.rules).toEqual([])
     // An empty `levels` list means "the shipped ladder", resolved by prepareConfig.
@@ -72,6 +76,21 @@ describe('prepareConfig validation', () => {
     const prepared = prepareConfig(parsed())
     expect(prepared.floor.id).toBe('low')
     expect(prepared.ceiling.id).toBe('high')
+  })
+
+  it('rejects a classifierModel that is not provider/model', () => {
+    expect(() => prepareConfig(parsed({ classifierModel: 'deepseek-v4-flash' }))).toThrow(/provider\/model/)
+  })
+
+  it('accepts an explicit classifier route and model backend', () => {
+    const config = parsed({ classifier: 'model', classifierModel: 'deepseek-official/deepseek-v4-flash' })
+    expect(config.classifier).toBe('model')
+    expect(() => prepareConfig(config)).not.toThrow()
+  })
+
+  it('rejects an out-of-range classifier timeout or token cap', () => {
+    expect(() => prepareConfig(parsed({ classifierTimeoutMs: 10 }))).toThrow(/classifierTimeoutMs/)
+    expect(() => prepareConfig(parsed({ classifierMaxTokens: 0 }))).toThrow(/classifierMaxTokens/)
   })
 
   it('accepts a rule pinning a configured custom level', () => {

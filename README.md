@@ -360,6 +360,7 @@ auto-thinking-effort:
 | 钳制 / 查不到能力 / 无共享档位 | 用假 `llm` 服务覆盖 |
 | 轮内 steering 只升不降、裸接续继承、跨轮不串档 | 见 `tests/state.spec.ts`、`tests/wiring.spec.ts` |
 | **settings 命名空间**（注册参数、无 provider 降级、用户层优先、watch 后重配、禁用后拆档位、非法值保留上一份） | `tests/wiring.spec.ts` 的 `settings namespace` 组（6 个），用假 settings provider 模拟 `register`/`watch` 契约 |
+| **设置页的表单逻辑**（草稿→保存→一次原子 mutation；保存失败必须报错且保留草稿；重置 = `unset`；写成功后不得报假失败） | `tests/client.spec.ts`（3 个）：桩 `window.__ModuleLoader__` + 假 React + 假 ctx，真跑 `src/client.js`。渲染与布局仍只有真机验证 |
 
 **没有真机验证的**（已知缺口，不要当成已验证）：
 

@@ -119,7 +119,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 
 > 这两次比对用 `--patch` 把 `settings-file` 指向 `.verify/settings-verify.yaml`（临时设置，默认档位不带 effort），否则用户当前的 `reasoningEffort: high` 会让会话走手动档、插件根本不介入。
 
-**只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`：真 cordis Context + 真 `installModelSelection` + 真 waterfall，且**故意先注册 selection**）：
+**只在进程内验证**（`tests/wiring.spec.ts` / `tests/capability.spec.ts` / `tests/model-classifier.spec.ts`：真 cordis Context + 真 `installModelSelection` + 真 waterfall，且**故意先注册 selection**；`tests/client.spec.ts` 则是桩 `window.__ModuleLoader__` + 假 React + 假 ctx 真跑 `src/client.js`）：
 
 - Auto 注入 / 放行 / 落盘剥离 / dispose 恢复 / 幂等 / 无 llm 服务降级
 - Auto 在没有分类结果时也必须落成真实档位（绝不把 `auto` 写进请求）
@@ -128,7 +128,9 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 - 模型分类：pin 时不调用、候选集只含 floor..ceiling、答案解析（含「最早出现」「不匹配更长单词」）、超时与四种失败都回落、缓存命中
 - **settings 命名空间（6 个）**：注册参数（名字/base/`applies: 'live'`）、没挂 provider 时降级到 composition 行、用户层在加载期优先、watch 提交后重配（同一个 harness 里两次分类结果不同）、`enabled: false` 后不再广告档位但兜底仍生效、非法提交保留上一份配置。（harness 新增 `settle()`：注入回调不在 `apply` 的同步路径上。）
 
-**没有任何自动化测试的部分**：浏览器半边（`src/client.js`）只有真机验证 —— 本仓库没有客户端测试运行时，也不该为此拉一个。所以它的回归网就是 D19/D20 那两张表和本文 §5 的真机步骤；改它之后**必须**手动跑一遍「导航出现 / 表单渲染 / 模型下拉 / 保存 / host 采纳 / 重置 / 插件列表不重复」这几步。
+- **浏览器半边（3 个，`tests/client.spec.ts`）**：用桩 `window.__ModuleLoader__` + 假 React（`useState`/`useSyncExternalStore` 自己实现）+ 假 ctx（`slots`/`settingsScope`）把 `src/client.js` 真跑一遍——「草稿→保存→一次 `mutate`（ops 与 revision 栅都对）且**不报假失败**」「保存失败要显示错误、草稿保留可重试」「重置 = 一次 `unset`」。
+
+**仍然没有自动化测试的部分**：浏览器半边的**渲染与布局**只有真机验证（本仓库没有客户端测试运行时，也不该为此拉一个）。所以它的大回归网还是 D19/D20 那两张表 + 本文 §5 的真机步骤；改它之后**必须**手动跑一遍「导航出现 / 表单渲染 / 模型下拉 / 保存 / host 采纳 / 重置 / 插件列表不重复」。但保存路径这类逻辑回归现在会被 `tests/client.spec.ts` 拦住 —— 这个文件的存在理由就是一次真实事故：`save()` 曾经带一个从没被传进来的 `onSaved` 参数，写成功之后紧跟一个 `TypeError`，被 `catch` 报成「保存失败」（详见 §6 陷阱 16）。
 
 **未真机验证（已知缺口）**：
 
@@ -162,6 +164,7 @@ node scripts\inspect-session.mjs <session-dir> --grep "request/header"
 13. **手改 `~/.dsh/settings.yaml` 时别把下一段的 key 吃掉**：这次差点把 `dsh-better-sidebar:` 这行删成注释，结果整个 sidebar 的键被归到本插件命名空间下。改完用真 yaml 解析器验一下（`yaml.parseDocument(...).errors` + 打印 section 名），因为 settings provider 只会觉得“这一段多了一些键”。
 14. **一个坏的第三方客户端插件会让整个 GUI 白屏**（2026-09-10 实测，**已由上游修复**）：用户 `web` profile 里的 `@kenz1117/dsh-ui-usage-billing@1.1.12`（12:03 装/更新）客户端 bundle `require("@deepseek-ai/dsh-client-runtime/client")`，这个 specifier 既不在平台 seed 表、也不是已注册的包 factory → 客户端 boot 直接 `Failed to load plugins`，**所有插件的入口（包括本插件）都不出现**。12:40:56 该包更新到 **1.2.0** 后不再引用它，真机复核用户 profile 已恢复正常。教训：① 客户端侧一个坏 external 能拖垮整页，排查时先看页面顶上那行红字；② 验证本插件时别把这种环境故障当成插件问题，必要时用 §8 的干净 profile 配方。
 15. **验证客户端半边要一个新进程 + 干净 profile**：`dsh --profile web --port 0` 起第二个实例即可（会和用户的 3080 共用 `~/.dsh`，但 `--patch` 能把 `settings-file` 指到 scratch 文件，不碰真设置）；如果用户的 profile 里有坏插件，改用 §8 的三行配方建一个只装 `dsh-base` + `dsh-web-app` + 本插件的 `webverify`。
+16. **写成功之后抛出的异常会被当成"写失败"**（2026-09-10 真实事故）：浏览器半边的 `save()` 里，`await scope.mutate(...)` 成功后紧跟了一行 `onSaved()`，而那个参数从没被调用方传进来过 → `TypeError` 被同一个 `catch` 抓住 → 页面红字「保存失败：onSaved is not a function」，**而 `settings.yaml` 其实已经写进去了**（用户就是这么报的）。教训：写操作的 `try` 里**只放写本身**；「写成功之后要做的事」要么放在 `try` 之后的独立步骤，要么确保它不可能抛。顺带一条：这类错误用「文件变没变」是验不出来的（文件确实变了），必须**同时**看界面有没有报错 —— `tests/client.spec.ts` 现在就是这么断言的两个面。
 
 ---
 

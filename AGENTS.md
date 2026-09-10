@@ -100,6 +100,11 @@ configure the same resolved value.
   platform table, and the surfaces bind nothing but `ctx.slots`,
   `ctx.settingsScope`, and the model catalog read through
   `ctx.inject(['remote', 'remote.session'], …)` (`docs/design.md` D19/D20).
+  **Nothing may throw between the write settling and the drafts clearing**: the
+  save's `catch` reports whatever it catches as a failed save, so a stray call
+  after a successful `mutate` turns a stored write into a red banner (that is
+  exactly what shipped once: `onSaved is not a function`, with the document
+  already written). `tests/client.spec.ts` guards the path.
 - **The plugin owns one settings page and no Plugins card.** `settings.section`
   is keyed by this plugin's own id (`auto-thinking-effort`, `order: 12`, label
   「自动思考强度」); the `settings.plugin.item` registration was deliberately

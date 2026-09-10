@@ -31,6 +31,8 @@ So "how do I specify it manually?" needs no extra mechanism: **pick a concrete g
 
 `model` is the default because reading the question beats reading its shape; the call answers one word, has a hard deadline, and falls back to the heuristics on any failure. Set `classifier: heuristic` for a path that makes no call at all.
 
+**The classifier itself does not think.** Its own effort is `classifierEffort`, defaulting to **`off`**: the classifier's job is to understand the sentence you already wrote, not to study it, so it stays the cheapest call in the turn. An empty `''` means "whatever the weakest rung of the classifier route is"; any other value names an effort that route declares. It is a dropdown on the settings page.
+
 The model backend's contract:
 
 - **Only called on turns without a pin.** If the user wrote `ultrathink` / `think hard` / `深入思考`, that call is skipped — a pin always wins.
@@ -199,6 +201,7 @@ The shortest path: **Settings → Plugins → Plugin configuration** holds an �
 | `autoCeilingLevel` | `high` | Highest **score-derived** level; pins bypass it. |
 | `classifier` | `model` | Which backend decides: `model` (default, one small-model call) or `heuristic` (pure function, no call). |
 | `classifierModel` | `''` | Route for that call, `provider/model`; empty follows the session's own route. The settings page renders this as a dropdown of your configured models. |
+| `classifierEffort` | `off` | The **classifier's own** reasoning effort: `off` answers without thinking, `''` uses the route's weakest declared rung, any other value names an effort that route declares. |
 | `classifierTimeoutMs` | `8000` | Hard deadline for one classifier call, in milliseconds. |
 | `classifierMaxTokens` | `64` | Output cap for the classifier call (it answers with one word). |
 | `applyToSubagents` | `false` | Also classify subagent children (their route is usually chosen by the caller). |
@@ -239,7 +242,7 @@ The package ships its own browser half (`src/client.js` → `lib/client.js`), wh
 
 > The Plugins section no longer shows a card for this plugin: once there is a page of its own, a second copy of the same form in the plugin list only creates doubt. The namespace itself stays registered — that is the half that decides where configuration lives and how it applies live.
 
-Fields: `enabled`, `classifier`, `classifierModel`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
+Fields: `enabled`, `classifier`, `classifierModel`, `classifierEffort`, `autoFloorLevel`, `autoCeilingLevel`, `maxChars`, `classifierTimeoutMs`, `classifierMaxTokens`, `autoWhenUnset`, `applyToSubagents`, `inheritOnContinuation`, `dryRun`, `logDecisions`. Behaviour:
 
 - `classifierModel` is a **dropdown** fed by the host's model catalog (`remote.session.modelCatalog` — the same list the composer's model picker shows), so "the models you already configured" means the same thing in both places; an extra entry means "follow the session's own route". When the catalog is unavailable the field degrades to free text and says why.
 - Drafts stay in the form until **save**, which writes one atomic mutation fenced at the revision the draft started from — a concurrent editor is refused, never silently overwritten.
@@ -337,6 +340,7 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Real run: ceiling holds a heavy score back | long no-pin text (why+codebase+deadlock+analyze+prove+design+migration…) | `reasoningEffort: "high"` (score qualifies for `max`, ceiling blocks it) | `session-771ee9b3` |
 | Real run: the model backend decides | the same prompt (quote the first README paragraph) with `classifier: heuristic` vs `classifier: model` (`deepseek-v4-flash`) | heuristic `high` → model `low`: the model judged it trivial and overrode the heuristics | `session-81e78e99` / `session-7de3b60c` |
 | Real run: a failing classifier cannot break the turn | `classifierModel` pointing at a nonexistent model | the request went out normally, effort fell back to the heuristic `high` | `session-718b1f73` |
+| **Real run: the classifier does not think (v0.6.0)** | the real settings (`classifier: model`, `classifierModel: deepseek-flash`, `classifierEffort: off`) with `dsh --profile headless "git status"` | the request header reads `reasoningEffort: "off"` (the classifier call thought nothing) while the turn was still classified as `high` | `session-09d22183` |
 | **Real run: the `settings.yaml` user layer is honoured (v0.6)** | `--patch` pointing `settings-file` at a scratch file holding only `auto-thinking-effort: { autoFloorLevel: low }` (the profile row still says `minimal`), then `dsh --profile headless "git status"` | `reasoningEffort: "low"` (the profile row alone gives `"off"` for that prompt) | `session-518c09e2` vs `session-3af16e67`; final build re-checked in `session-de9b7ee1` |
 | **Real run: a running host reconfigures live (v0.6)** | one `dsh --profile web --port 0` process, never restarted: it booted with `autoCeilingLevel: max`, the file was changed to `high` and one turn sent, then changed back to `max` and the same turn sent again | `request/header` followed the file inside one process (`high` / `max`); the provider's own default is `high`, so `max` can only come from the plugin | `session-0f47f1c6` / `session-b7f7a469`; final build re-checked (booted at `high`, edited to `max`) in `session-ce7ffac5` |
 | **Real run: its own page in Settings (v0.6)** | a fresh `dsh --profile web --port 0` process, Settings opened | the left navigation gains 自动思考强度 (right after 模型) and the page renders the whole form; `classifier` defaults to `model` | `docs/design.md` D19/D20 |
@@ -353,6 +357,7 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | A gear always resolves to a real rung | `tests/wiring.spec.ts`: `reasoningEffort` is never `auto` |
 | Floor / ceiling / clamp direction / prose-only pins | `tests/levels.spec.ts`, `tests/classify.spec.ts`, `tests/wiring.spec.ts` |
 | Clamping / no capabilities / no shared rung | via a fake `llm` service |
+| **The classifier call's own effort** | the `model classifier` group in `tests/wiring.spec.ts`: `off` by default, the configured value when one is set, the route's weakest rung when it is blank |
 | Steering raises only, continuation inherits, no cross-turn leakage | see `tests/state.spec.ts`, `tests/wiring.spec.ts` |
 | **The settings namespace** (registration options, no-provider fallback, user layer wins, reconfiguration on a committed change, gear dropped when disabled, an invalid commit keeps the running config) | the `settings namespace` group in `tests/wiring.spec.ts` (6 cases) against a fake provider implementing the `register`/`watch` contract |
 | **The settings page's form logic** (draft → save → one atomic mutation; a rejected save must report and keep the draft; reset = `unset`; a settled write must not be reported as a failure) | `tests/client.spec.ts` (3 cases): a stub `window.__ModuleLoader__`, a fake React and a fake context running `src/client.js` for real. Rendering and layout are still covered by real-machine checks only |

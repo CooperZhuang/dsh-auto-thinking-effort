@@ -11,10 +11,10 @@
 分类有**两个后端**，**默认是 `model`**（一次小模型调用；有超时、失败回落、pin 优先），`heuristic` 是随时可切回的零调用路径（D20）。
 边界可配：**下限默认不设（可以到 `off`）**、**分数算出来的档位不超过 `high`（只有显式 pin 到 `max`）**、pin 只在正文匹配、钳制从下限一侧回答（见 `docs/design.md` D13–D17）。
 v0.6 新增：① 插件注册了一个 settings 命名空间 `auto-thinking-effort`，**profile 行是 base 层、`~/.dsh/settings.yaml` 同名段是用户层（优先且热生效）** —— 改完不用重启 `dsh web`（D18）；② 包**自带了浏览器半边**：**设置 → 自动思考强度**是一整页独立配置（左侧导航里排在「模型」之后、「插件」之前），**「设置 → 插件 → 插件配置」里不再有本插件的卡片**（用户要求：有了独立一页就不要重复出现）；`classifierModel` 是从本机模型目录来的下拉框（D19/D20）。
-已单测（123 个）、已真机验证（用户真实 web profile + 干净 scratch profile：导航出现、表单渲染、模型下拉、保存写入、host 采纳、重置、插件列表不再重复）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
+已单测（129 个）、已真机验证（用户真实 web profile + 干净 scratch profile：导航出现、表单渲染、模型下拉、保存写入、host 采纳、重置、插件列表不再重复；真实设置下 **分类调用自己是 `off`** 而判定结果照旧）、已装进本机 `headless` 与 `web` 两个 profile。**未发布到 npm**。
 代码提交见 `git log`；GitHub: https://github.com/CooperZhuang/dsh-auto-thinking-effort
 
-**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12）。同文件的 `auto-thinking-effort:` 段写了 `classifier: model` + `classifierModel: deepseek-official/deepseek-v4-flash` + `autoFloorLevel: minimal` + `autoCeilingLevel: high`；`web` profile 的 `cordis.patch.yml` 里那条 `auto-thinking-effort` 覆盖行（同样把分类后端设成 model）**保留作为 base 层**，兼顾旧版本。注意：用户当前跑着的 `dsh web` **还需要再重启一次**才会加载浏览器半边（bundle 与客户端 bundle 都不热加载；重启后左侧导航就会出现「自动思考强度」）。**⚠ 重启前先看 §6 陷阱 14：用户 `web` profile 里有一个第三方客户端插件会让整个客户端 boot 失败。**
+**当前用户设置状态**：`~/.dsh/settings.yaml` 的 `agent-default-model` **没有** `reasoningEffort`（= 新会话默认 Auto，见 D12；模型已被用户改成 `deepseek-flash`）。同文件的 `auto-thinking-effort:` 段现在是：`classifier: model` + `classifierModel: deepseek-official/deepseek-flash` + `classifierEffort: off` + `autoFloorLevel: minimal` + `autoCeilingLevel: max` + `applyToSubagents: true`；`web` profile 的 `cordis.patch.yml` 里那条 `auto-thinking-effort` 覆盖行（分类后端 model）**保留作为 base 层**，兼顾旧版本。改动这个段**即时生效**，只有 bundle/客户端 bundle 变了才需要重启 `dsh web`。
 ---
 
 ## 1. 这个项目要做什么
@@ -55,7 +55,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | `src/classify.ts` | `classify`（pin → 加权 → 结构特征 → 分数带 → 裸接续继承 → **天花板**）、`stripNonProse`、`truncateForClassification` |
 | `src/state.ts` | `AgentState`：轮状态、steering 只升不降、`forTurn` 只认同一轮 |
 | `src/model-classifier.ts` | **可选模型分类后端**：`buildClassifierPrompt`（用阶梯的 id+description 生成提示）、`parseClassifierAnswer`（取最早出现的档位词）、`runModelClassifier`（`ctx.llm.stream` + 超时 + 四种失败都返回 undefined） |
-| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读；子代理默认跳过；**在这里发起模型分类**）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；**在这里 await 分类结果**；disabled 时只做兜底改写）、**settings 命名空间**（`SETTINGS_NAMESPACE`、`ctx.inject(['settings'])` → `register`/`adopt`/`watch`，见 D18） |
+| `src/index.ts` | 接线：Auto 注入、`agent/pre-step`（只读；子代理默认跳过；**在这里发起模型分类**）、`agent/request`（`prepend: true`；auto→真实档位；具体档位原样返回；**在这里 await 分类结果**；disabled 时只做兜底改写）、**settings 命名空间**（`SETTINGS_NAMESPACE`、`ctx.inject(['settings'])` → `register`/`adopt`/`watch`，见 D18）；`startClassification` 里解析**分类调用自己的档位**（`classifierEffort`，默认 `off`，见 D21） |
 | `src/client.js` | **浏览器半边**（唯一不经 tsc 的源码）：惰性 CJS client bundle，只向 `settings.section` 注册**一页设置**（id/ns `auto-thinking-effort`、label「自动思考强度」、order 12）；绑定 `ctx.settingsScope`，草稿→一次原子 `mutate`（revision 设栅），留空即 `unset`；`classifierModel` 用 `ctx.inject(['remote','remote.session'])` 读模型目录（见 D19/D20） |
 | `scripts/build-client.mjs` | 把 `src/client.js` 拷成 `lib/client.js` 并校验 bundle 形状与 id（错了就构建失败） |
 | `scripts/inspect-session.mjs` | 逐帧解 `session.jsonl.zstd` 并打印关键事件（**多帧！**） |
@@ -112,6 +112,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 | **真机：settings 用户层在加载期被读到（v0.6）** | `--patch` 把 `settings-file` 指到 `.verify/settings-user-layer.yaml`（只有用户层写 `autoFloorLevel: low`，base 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `"low"`（base 单独跑同句是 `"off"`） | `session-518c09e2` vs `session-3af16e67` |
 | **真机：跑着的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（PID 18604，10:03:40 启动，全程未重启），对同一句 `why does the whole codebase deadlock? prove the invariant.`：文件里先 `autoCeilingLevel: max`，改成 `high` 后再发一次，再改回 `max` 又发一次 | 同一进程内 `request/header` 随文件变化（provider 自己的默认是 `high`，因此 `max` 只可能来自插件） | `session-0f47f1c6`（high） / `session-b7f7a469`（max）；最终构建单点复核 `session-ce7ffac5`（max） |
 | **真机：设置页里独立的一项（v0.6.0）** | 全新 `dsh --profile webverify`（`dsh-base` + `dsh-web-app` + 本插件，绕开当时坏掉的第三方客户端插件），打开「设置」 | 左侧导航出现「自动思考强度」（「模型」之后、「插件」之前），点开是完整表单；`classifier` 默认选中 `model` | `docs/design.md` D19/D20 |
+| **真机：分类调用自己不思考（v0.6.0）** | 真实设置（`classifier: model` + `classifierModel: deepseek-flash` + `classifierEffort: off`）跑 `dsh --profile headless "git status"` | 该轮 `request/header` = `"off"`（分类调用没思考），而它仍把这一轮判成 `high`（用户 `autoCeilingLevel: max`）——"想"与"判"确实分开了 | `session-09d22183` |
 | **真机：`classifierModel` 下拉（v0.6.0）** | 同一进程展开该字段，并选一个保存 | 选项 = 本机模型目录的 4 个模型 +「（跟随会话模型）」；保存后 `settings.yaml` 写入 `classifierModel: deepseek-official/deepseek-v4-flash` | 同一 scratch 设置文件 |
 | **真机：热重配（v0.6，含设置页写入）** | 同上进程：表单里 `autoFloorLevel: low` 保存 → 新会话 `git status` | 文件写入 + `request/header` = `"low"`（base 单独跑同句是 `"off"`） | `session-b340648b` |
 | **真机：设置页里「重置」= 清除覆盖（v0.6）** | 点该字段的「重置」再保存 | `settings.yaml` 里 `autoFloorLevel` 一行消失（重新继承 base 的 `minimal`） | 同一 scratch 设置文件 |
@@ -125,7 +126,7 @@ DSH 插件：**根据用户这一轮的提问自动选择模型的思考档位**
 - Auto 在没有分类结果时也必须落成真实档位（绝不把 `auto` 写进请求）
 - 钳制 / 查不到能力 / 无共享档位
 - 轮内 steering 只升不降、裸接续继承、跨轮不串档、手动档位原样返回
-- 模型分类：pin 时不调用、候选集只含 floor..ceiling、答案解析（含「最早出现」「不匹配更长单词」）、超时与四种失败都回落、缓存命中
+- 模型分类：pin 时不调用、候选集只含 floor..ceiling、答案解析（含「最早出现」「不匹配更长单词」）、超时与四种失败都回落、缓存命中、**分类调用自己的档位（默认 `off` / 配了用配的 / 留空回落到该路线最弱档）**
 - **settings 命名空间（6 个）**：注册参数（名字/base/`applies: 'live'`）、没挂 provider 时降级到 composition 行、用户层在加载期优先、watch 提交后重配（同一个 harness 里两次分类结果不同）、`enabled: false` 后不再广告档位但兜底仍生效、非法提交保留上一份配置。（harness 新增 `settle()`：注入回调不在 `apply` 的同步路径上。）
 
 - **浏览器半边（3 个，`tests/client.spec.ts`）**：用桩 `window.__ModuleLoader__` + 假 React（`useState`/`useSyncExternalStore` 自己实现）+ 假 ctx（`slots`/`settingsScope`）把 `src/client.js` 真跑一遍——「草稿→保存→一次 `mutate`（ops 与 revision 栅都对）且**不报假失败**」「保存失败要显示错误、草稿保留可重试」「重置 = 一次 `unset`」。

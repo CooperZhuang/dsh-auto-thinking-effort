@@ -327,6 +327,27 @@
 
 ---
 
+## D21 — 分类模型自己**不思考**（`classifierEffort: off`）
+
+**决定**：分类调用自己的 `reasoningEffort` 默认是 **`off`**（新键 `classifierEffort`，schema 默认 + bundle 行的 base 层都写死）。留空 `''` 表示退回到「该分类路线声明的最弱档」（D17 原来的行为），写具体 effort id 就按它来。
+
+**为什么**：分类调用的职责是**读懂你已经写下来的那句话**，不是研究它。判定一个请求的难度不需要推理链——它需要的是一次便宜的判断。而在这之前，分类调用走的是「该路线最弱档」，对 DeepSeek 是 `off`、对一个只声明 `low/high` 的路线就是 `low`；更要紧的是，**如果那条路线的最弱档是 `high`，分类调用就会比它判定的那一轮还贵**。
+
+| 方案 | 分类调用的成本 | 备注 |
+|---|---|---|
+| 不传 effort（用 provider 默认） | 未知，通常是 `high` | 一个"决定要不要多想"的调用自己先多想了 |
+| 路线最弱档（D17 原行为） | 路线说了算 | 只声明 `high` 的路线 → 分类器也 `high` |
+| **`off`（现在）** | 最低 | 若路线不声明 `off`，适配器会**显式报错**，失败按 D17 回落到启发式（`classifier:failed` 只警告一次） |
+| `''` | 路线最弱档 | 给"这条路线没有 `off`/`none`"的部署留的出口 |
+
+**代价 / 边界**：硬钉 `off` 会让「不声明 `off` 的路线」每次分类都失败——但它们本来就只是回落（D17 的契约保证不会有比启发式更坏的结果），而且 `logDecisions` 下会看到一条 `classifier:failed:<route>` 警告，指向那个 `classifierEffort` 设置。这是显式选择：宁可让分类器便宜到不思考，也不要它偷偷地思考。
+
+**真机验证**（用户真实设置：`classifier: model` + `classifierModel: deepseek-official/deepseek-flash` + `classifierEffort: off`）：`dsh --profile headless "git status"` 跑完，会话日志里 `request/header` 记的是 `reasoningEffort: "off"` —— 分类模型**没有思考**，却把这一轮判成了 `high`（用户当时 `autoCeilingLevel: max`），也就是说"想"和"判"确实分开了。
+
+**证据**：`src/config.ts`（`classifierEffort` 默认 `'off'`）、`src/index.ts`（`startClassification` 里 resolve effort）、`cordis.patch.yml`、`src/client.js`（设置页的档位下拉）、`tests/wiring.spec.ts` 的 `model classifier` 组（默认 `off` / 配了就用配的 / 留空回落到最弱档）。
+
+---
+
 ## 未定 / 开放问题
 
 | 编号 | 问题 | 现状 |

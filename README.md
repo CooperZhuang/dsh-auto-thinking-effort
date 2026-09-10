@@ -29,14 +29,16 @@
 | `model`（默认） | **一次小模型调用**：把允许的档位和它们的说明写进系统提示，让模型只回一个词 | 每轮 +1 次小请求（可设硬超时、失败回落） |
 | `heuristic` | 纯函数：正则规则加权 + 结构特征 | 0 |
 
-默认选 `model`，因为「读懂提问」比「读懂提问的形状」更准；它只回一个词、有硬超时、任何失败都回落到启发式，代价可控。想彻底零调用就把它设成 `heuristic`（`/` 设置页里的下拉或 `settings.yaml` 里一行）。
+默认选 `model`，因为「读懂提问」比「读懂提问的形状」更准；它只回一个词、有硬超时、任何失败都回落到启发式，代价可控。想彻底零调用就把它设成 `heuristic`（设置页里的下拉或 `settings.yaml` 里一行）。
+
+**分类模型自己不思考**：它的档位由 `classifierEffort` 决定，**默认 `off`** —— 分类调用的职责是读懂你已经写下来的那句话，不是研究它；`off` 让它永远是这一轮最便宜的一次调用。留空 `''` = 用该分类路线声明的最弱档，写具体 effort 就按它来（设置页上是下拉框）。
 
 模型后端的硬规则：
 
 - **只在没有 pin 的轮次调用**。用户写了 `ultrathink` / `think hard` / `深入思考` 这类显式要求，就不花这次调用——pin 永远优先。
 - **只把允许的档位写进提示**。候选 = 阶梯上 `autoFloorLevel`..`autoCeilingLevel` 之间的档位，所以策略上限不会被模型绕过；候选不足 2 个时直接跳过调用。
 - **`agent/pre-step` 发起、`agent/request` 等待**，这段延迟与提示组装重叠；另有 `classifierTimeoutMs` 硬超时。
-- **任何失败都回落到启发式判定**：模型不存在、stream 报错、超时、回答解析不出来——这一轮照常跑，档位用启发式算出来的那个。
+- **任何失败都回落到启发式判定**：模型不存在、stream 报错、超时、回答解析不出来——这一轮照常跑，档位用启发式算出来的那个。（`classifierEffort` 钉了一个该路线不支持的档位时也走这条路，日志里会有一次 `classifier:failed:<route>` 警告。）
 - 回答按文本缓存（同一句话、同一路线、同一候选集不重复调用，最多记 64 条）。
 - 档位的 `description` 会写进提示，所以自定义阶梯也能向模型解释自己；没写就退回用 id。
 
@@ -205,6 +207,7 @@ dsh plugin --profile web add dsh-auto-thinking-effort
 | `autoCeilingLevel` | `high` | **分数算出**的档位上限；pin 不受它约束。 |
 | `classifier` | `model` | 分类后端：`model`（默认，一次小模型调用）或 `heuristic`（纯函数，零调用）。 |
 | `classifierModel` | `''` | 模型后端用的路线 `provider/model`；留空 = 跟随该会话自己的路线。设置页里是一个下拉框，选项 = 你已配置的模型。 |
+| `classifierEffort` | `off` | **分类模型自己**的思考档位：`off` = 不思考、只回一个词；`''` = 用该分类路线声明的最弱档；也可以写具体 effort。 |
 | `classifierTimeoutMs` | `8000` | 单次分类调用的硬超时（毫秒）。 |
 | `classifierMaxTokens` | `64` | 分类调用的输出上限（它只回一个词）。 |
 | `applyToSubagents` | `false` | 是否也管子代理会话（子代理通常由调用方指定路线，默认不动）。 |
@@ -245,7 +248,7 @@ auto-thinking-effort:
 
 > 「设置 → 插件 → 插件配置」里**不再**出现本插件的卡片：既然有了独立的一页，插件列表里再放一份同样的表单只会让人困惑。（命名空间本身仍然注册着——它才是「配置存在哪、怎么热生效」的那一半。）
 
-表单的字段：`enabled`、`classifier`、`classifierModel`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
+表单的字段：`enabled`、`classifier`、`classifierModel`、`classifierEffort`、`autoFloorLevel`、`autoCeilingLevel`、`maxChars`、`classifierTimeoutMs`、`classifierMaxTokens`、`autoWhenUnset`、`applyToSubagents`、`inheritOnContinuation`、`dryRun`、`logDecisions`。行为：
 
 - `classifierModel` 是**下拉框**，选项来自 host 的模型目录（`remote.session.modelCatalog`，和输入框旁边那个模型选择器同一份数据），所以「已配置好的模型」在两处含义一致；多出一个「（跟随会话模型）」= 不额外指定路线。模型目录拿不到时会自动退回可手填 `provider/model` 的文本框（并在下面说明原因）。
 - 草稿先暂存在表单里，**保存**才写入；写入是一次原子 mutation，并用草稿开始时的 revision 设栅，别的界面并发改过就拒绕而不是静默覆盖。
@@ -343,6 +346,7 @@ auto-thinking-effort:
 | 真机：天花板挡住高分 | 无 pin 的重负载长文本（why+codebase+deadlock+analyze+prove+design+migration…） | `reasoningEffort: "high"`（分数够 `max` 但被天花板拦住） | `session-771ee9b3` |
 | 真机：模型后端生效 | 同一句话（把 README 第一段原样念一遍）分别用 `classifier: heuristic` 与 `classifier: model`（`deepseek-v4-flash`）跑 | 启发式 `high` → 模型 `low`：模型判断它 trivial 并覆盖了启发式 | `session-81e78e99` / `session-7de3b60c` |
 | 真机：分类器失败不影响这一轮 | `classifierModel` 指向一个不存在的模型 | 请求照常发出，档位回落到启发式的 `high` | `session-718b1f73` |
+| **真机：分类模型自己不思考（v0.6.0）** | 真实设置（`classifier: model` + `classifierModel: deepseek-flash` + `classifierEffort: off`）跑 `dsh --profile headless "git status"` | 请求头 `reasoningEffort: "off"`（分类调用没思考），而它仍把这一轮判成 `high` | `session-09d22183` |
 | **真机：`settings.yaml` 用户层生效（v0.6）** | `--patch` 把 `settings-file` 指到临时设置文件，里面只写 `auto-thinking-effort: { autoFloorLevel: low }`（profile 行仍是 `minimal`），跑 `dsh --profile headless "git status"` | `reasoningEffort: "low"`（profile 行单独跑同一句是 `"off"`） | `session-518c09e2` vs `session-3af16e67`；最终构建复核 `session-de9b7ee1` |
 | **真机：正在跑的 host 热重配（v0.6）** | 同一个 `dsh --profile web --port 0` 进程（全程未重启）：启动时文件里是 `autoCeilingLevel: max`，先改成 `high` 发一轮，再改回 `max` 发同一轮 | 同一进程内 `request/header` 随文件变化（`high` / `max`）；provider 自己的默认是 `high`，所以 `max` 只可能来自插件 | `session-0f47f1c6` / `session-b7f7a469`；最终构建复核（启动值为 `high`，改文件后拿到 `max`）`session-ce7ffac5` |
 | **真机：设置里独立的一页（v0.6）** | 全新 `dsh --profile web --port 0` 进程，打开「设置」 | 左侧导航多出「自动思考强度」（排在「模型」之后），点开是完整表单；`classifier` 默认选中 `model` | `docs/design.md` D19/D20 |
@@ -358,6 +362,7 @@ auto-thinking-effort:
 | Auto 档位注入 / 选择校验 / 落盘剥离 | `tests/capability.spec.ts`（含 dispose 恢复、幂等、无 llm 服务时降级） |
 | Auto 在没有分类结果时也要落成真实档位 | `tests/wiring.spec.ts`：`reasoningEffort` 永远不是 `auto` |
 | 钳制 / 查不到能力 / 无共享档位 | 用假 `llm` 服务覆盖 |
+| **分类调用自己的档位** | `tests/wiring.spec.ts` 的 `model classifier` 组：默认发 `off`、配了 `classifierEffort` 就发它、留空回落到该路线最弱档 |
 | 轮内 steering 只升不降、裸接续继承、跨轮不串档 | 见 `tests/state.spec.ts`、`tests/wiring.spec.ts` |
 | **settings 命名空间**（注册参数、无 provider 降级、用户层优先、watch 后重配、禁用后拆档位、非法值保留上一份） | `tests/wiring.spec.ts` 的 `settings namespace` 组（6 个），用假 settings provider 模拟 `register`/`watch` 契约 |
 | **设置页的表单逻辑**（草稿→保存→一次原子 mutation；保存失败必须报错且保留草稿；重置 = `unset`；写成功后不得报假失败） | `tests/client.spec.ts`（3 个）：桩 `window.__ModuleLoader__` + 假 React + 假 ctx，真跑 `src/client.js`。渲染与布局仍只有真机验证 |

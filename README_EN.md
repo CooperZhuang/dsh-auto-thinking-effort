@@ -355,6 +355,7 @@ The picker's list comes from `ctx.llm.resolveModelInfo(...).reasoning.efforts`, 
 | Clamping / no capabilities / no shared rung | via a fake `llm` service |
 | Steering raises only, continuation inherits, no cross-turn leakage | see `tests/state.spec.ts`, `tests/wiring.spec.ts` |
 | **The settings namespace** (registration options, no-provider fallback, user layer wins, reconfiguration on a committed change, gear dropped when disabled, an invalid commit keeps the running config) | the `settings namespace` group in `tests/wiring.spec.ts` (6 cases) against a fake provider implementing the `register`/`watch` contract |
+| **The settings page's form logic** (draft → save → one atomic mutation; a rejected save must report and keep the draft; reset = `unset`; a settled write must not be reported as a failure) | `tests/client.spec.ts` (3 cases): a stub `window.__ModuleLoader__`, a fake React and a fake context running `src/client.js` for real. Rendering and layout are still covered by real-machine checks only |
 
 **Not verified on a real machine** (known gaps — do not treat as verified):
 

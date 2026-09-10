@@ -22,7 +22,7 @@ describe('Config defaults', () => {
     expect(config.autoEffortId).toBe('auto')
     expect(config.autoEffortName).toBe('Auto')
     expect(config.autoWhenUnset).toBe(true)
-    expect(config.autoFloorLevel).toBe('low')
+    expect(config.autoFloorLevel).toBe('minimal')
     expect(config.autoCeilingLevel).toBe('high')
     expect(config.logDecisions).toBe(true)
     expect(config.classifier).toBe('heuristic')
@@ -74,7 +74,7 @@ describe('prepareConfig validation', () => {
 
   it('resolves the configured bounds', () => {
     const prepared = prepareConfig(parsed())
-    expect(prepared.floor.id).toBe('low')
+    expect(prepared.floor.id).toBe('minimal')
     expect(prepared.ceiling.id).toBe('high')
   })
 

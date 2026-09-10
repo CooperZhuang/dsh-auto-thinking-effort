@@ -180,23 +180,30 @@ describe('Auto gear', () => {
     expect((await h.request(1)).reasoningEffort).toBeUndefined()
   })
 
-  it('clamps a gear decision to the allowed rungs', async () => {
-    // `please do it` scores into the `low` band; this route has no `low`.
+  it('clamps a gear decision to the declared rungs', async () => {
+    // `please do it` scores into the `low` band; this route has no `low`, and
+    // with no floor the highest rung not exceeding the request is `off`.
     const h = harness({ efforts: ['off', 'high', 'max'], selectedEffort: GEAR })
+    await h.preStep(1, [userMessage('please do it')])
+    expect((await h.request(1)).reasoningEffort).toBe('off')
+  })
+
+  it('answers from the floor side once a floor excludes that rung', async () => {
+    const h = harness({ efforts: ['off', 'high', 'max'], selectedEffort: GEAR, config: { autoFloorLevel: 'low' } })
     await h.preStep(1, [userMessage('please do it')])
     expect((await h.request(1)).reasoningEffort).toBe('high')
   })
 
-  it('lifts the lowest band up to the configured floor', async () => {
+  it('lets the lowest band turn thinking off by default', async () => {
     const h = harness({ selectedEffort: GEAR })
     await h.preStep(1, [userMessage('git status')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
+    expect((await h.request(1)).reasoningEffort).toBe('off')
   })
 
-  it('lets the floor be removed explicitly', async () => {
-    const h = harness({ selectedEffort: GEAR, config: { autoFloorLevel: 'minimal' } })
+  it('holds the lowest band at `low` when the floor is raised', async () => {
+    const h = harness({ selectedEffort: GEAR, config: { autoFloorLevel: 'low' } })
     await h.preStep(1, [userMessage('git status')])
-    expect((await h.request(1)).reasoningEffort).toBe('off')
+    expect((await h.request(1)).reasoningEffort).toBe('low')
   })
 
   it('keeps a heavy score-derived decision under the ceiling', async () => {
@@ -254,13 +261,13 @@ describe('model classifier', () => {
   it('keeps the heuristic level when the classifier call fails', async () => {
     const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: null })
     await h.preStep(1, [userMessage('git status')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
+    expect((await h.request(1)).reasoningEffort).toBe('off')
   })
 
   it('ignores an answer the parser cannot read', async () => {
     const h = harness({ selectedEffort: GEAR, config: MODEL, classifierAnswer: 'I cannot tell' })
     await h.preStep(1, [userMessage('git status')])
-    expect((await h.request(1)).reasoningEffort).toBe('low')
+    expect((await h.request(1)).reasoningEffort).toBe('off')
   })
 
   it('offers the model only the levels inside the floor and ceiling', async () => {

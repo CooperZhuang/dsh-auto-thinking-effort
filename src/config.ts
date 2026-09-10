@@ -42,8 +42,9 @@ export interface ConfigShape {
   /** Treat a request with no explicit effort as auto too. */
   autoWhenUnset: boolean
   /**
-   * Weakest level auto may resolve to. Set it to the ladder's weakest level to
-   * let auto turn thinking off entirely.
+   * Weakest level auto may resolve to. The default is the ladder's weakest rung,
+   * i.e. **no floor**: auto may turn thinking off. Raise it (e.g. to `low`) to
+   * keep auto from ever switching thinking off.
    */
   autoFloorLevel: string
   /** Highest level a score-derived auto decision may reach (pins bypass it). */
@@ -95,7 +96,7 @@ export const Config: z<ConfigShape> = z.object({
   autoEffortName: z.string().default('Auto'),
   autoEffortDescription: z.string().default('Pick the effort per turn from your message'),
   autoWhenUnset: z.boolean().default(true),
-  autoFloorLevel: z.string().default('low'),
+  autoFloorLevel: z.string().default('minimal'),
   autoCeilingLevel: z.string().default('high'),
   applyToSubagents: z.boolean().default(false),
   inheritOnContinuation: z.boolean().default(true),

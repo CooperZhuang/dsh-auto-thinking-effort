@@ -82,6 +82,32 @@ export interface ConfigShape {
   maxChars: number
 }
 
+/**
+ * Mark one schema node volatile.
+ *
+ * A volatile field is handed to `apply` as a **live reference** (the Loader
+ * updates it in place and then emits `loader/volatile-update`, so a change
+ * applies without a restart or a remount), and it is the only kind of field the
+ * platform's config form may write.
+ *
+ * The host tests `schema.meta.volatile` — `cordis-plugin-loader` reads
+ * `schema?.meta?.volatile`, and `dsh-settings` gates both `volatileForm` and
+ * `isVolatilePath` on it — so the two spellings are equivalent. Prefer
+ * schemastery's own `.volatile()` (3.18.3+); the copy this profile resolves
+ * through the shared junction is 3.18.2 and has no such method, so fall back to
+ * setting the flag directly. The fallback stops being taken once that copy is
+ * upgraded.
+ *
+ * @param schema - the field schema to mark.
+ * @returns the same schema, marked.
+ */
+function volatile<T>(schema: T): T {
+  const candidate = schema as { volatile?: () => T; meta?: { volatile?: boolean } }
+  if (typeof candidate.volatile === 'function') return candidate.volatile()
+  if (candidate.meta !== undefined) candidate.meta.volatile = true
+  return schema
+}
+
 /** Schemastery schema for {@link ConfigShape}. */
 export const Config: z<ConfigShape> = z.object({
   enabled: z.boolean().default(true),
@@ -117,6 +143,45 @@ export const Config: z<ConfigShape> = z.object({
   maxChars: z.number().default(8_000),
 })
 
+// Every knob is editable from the plugin's own settings page, so every knob is
+// volatile. Marking the top-level fields is enough: `isVolatilePath` returns
+// true as soon as it meets a volatile ancestor, so `levels` and `rules` stay
+// writable all the way down.
+for (const field of Object.values((Config as unknown as { dict: Record<string, unknown> }).dict)) {
+  volatile(field)
+}
+
+/** Whether a value is one of the Loader's live config references. */
+function isVolatileRef(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as { get?: unknown }).get === 'function'
+  )
+}
+
+/**
+ * Unwrap the Loader's live config references.
+ *
+ * A volatile field arrives as `{ get(): T }` and only changes value when the
+ * Loader writes it back, so every read has to call `get()` afresh — and the
+ * unwrapping must happen *before* validation, because the strict schema has to
+ * see plain booleans, numbers, strings and arrays. A plain object (a scripted
+ * mount, a test) passes straight through.
+ *
+ * @param raw - entry config row, live references and all.
+ * @returns the same shape with plain values.
+ */
+export function plainConfig(raw: unknown): Record<string, unknown> {
+  const source = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  const plain: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(source)) {
+    plain[key] = isVolatileRef(value) ? (value as { get(): unknown }).get() : value
+  }
+  return plain
+}
+
 /**
  * Normalize a raw configuration through the schema.
  *
@@ -128,7 +193,7 @@ export const Config: z<ConfigShape> = z.object({
  * @returns the normalized configuration.
  */
 export function resolveConfig(raw: unknown = {}): ConfigShape {
-  return Config(raw as ConfigShape)
+  return Config(plainConfig(raw) as unknown as ConfigShape)
 }
 
 /** Validated configuration plus the compiled rule list and resolved bounds. */

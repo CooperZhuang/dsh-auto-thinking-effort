@@ -46,7 +46,7 @@ import { installAutoGear, requestsAutoGear } from './capability.ts'
 import type { AutoGear } from './capability.ts'
 import { classify } from './classify.ts'
 import type { Decision } from './classify.ts'
-import { Config, prepareConfig } from './config.ts'
+import { Config, prepareConfig, resolveConfig } from './config.ts'
 import type { ConfigShape, PreparedConfig } from './config.ts'
 import { levelForScore, resolveEffort, weakestRung } from './levels.ts'
 import type { LevelSpec } from './levels.ts'
@@ -57,6 +57,19 @@ import type { TurnRecord } from './state.ts'
 
 /** Plugin name, used by the composition row and every log line. */
 export const name = 'auto-thinking-effort'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Emitted by the Loader after it rewrites volatile config references in
+     * place. Declared here rather than imported: this plugin also mounts in a
+     * deployment with no Loader at all, so `cordis-plugin-loader` is not one of
+     * its dependencies.
+     * @param paths - the config paths that changed.
+     */
+    'loader/volatile-update'(paths: readonly (readonly string[])[]): void
+  }
+}
 
 /**
  * No hard service dependency: `llm` is resolved lazily through `ctx.get`, so a
@@ -101,32 +114,13 @@ interface PendingClassification {
 type CapabilityContext = Pick<RequestContext, 'ctx' | 'config' | 'capabilities' | 'logger'>
 
 /**
- * Settings namespace this plugin owns. The composition row in `cordis.patch.yml`
- * is the **base** layer; the user layer lives in `settings.yaml` under this key,
- * so programmatic writes and hand edits land in the same documented place.
+ * Settings namespace this plugin owns — its entry id in the profile, and the key
+ * both the browser half's `ctx.configForms.get(…)` and the settings navigation
+ * use. DSH 0.1.7 made the composition row the **only** configuration layer:
+ * `settings.yaml` is gone, and the fields the schema marks volatile are edited
+ * in place through the entry's config form.
  */
 export const SETTINGS_NAMESPACE = 'auto-thinking-effort'
-
-/**
- * The slice of `ctx.settings` this plugin uses, declared structurally on
- * purpose: the plugin works without a settings provider (it then runs on the
- * composition row alone), so `@deepseek-ai/dsh-settings` is not a peer.
- * Mirrors `SettingsProvider.register` and `SettingsScope` — see
- * `dsh-settings/lib/types/index.d.ts:206` and `:84-113`.
- */
-interface SettingsScope {
-  /** Resolved value: schema defaults, then the composition base, then the user layer. */
-  get(): ConfigShape
-  /** Observe committed changes to the resolved value. */
-  watch(callback: (next: ConfigShape, previous: ConfigShape) => void | Promise<void>): () => void
-}
-interface SettingsRegistry {
-  register(namespace: string, schema: unknown, options: {
-    base?: Partial<ConfigShape>
-    applies?: 'live' | 'restart'
-    validate?: (value: ConfigShape) => void
-  }): SettingsScope
-}
 
 /** One resolved configuration plus everything derived from it. */
 interface Runtime {
@@ -138,20 +132,25 @@ interface Runtime {
 /**
  * Install the plugin's listeners and the synthetic gear.
  *
- * The configuration is resolved through a settings namespace when the
- * deployment mounts one: the composition row is the base layer and
- * `settings.yaml` the user layer, so a change there reconfigures the running
- * host without reloading the plugin row.
+ * The configuration comes from the composition row, and only from there: DSH
+ * 0.1.7 removed `settings.register` together with the `settings.yaml` user
+ * layer. The fields the schema marks volatile arrive as live references, so a
+ * write through the config form reconfigures the running host without reloading
+ * the plugin row. Edits that break a cross-field rule are still refused — just
+ * at adoption time rather than at the write site, so the running configuration
+ * survives them.
  *
  * @param ctx - plugin context; every registration is disposed with it.
- * @param config - the composition row's configuration (the settings base layer).
+ * @param config - the composition row's configuration (volatile fields are live references).
  * @throws when the configuration is invalid (fail loud at load time).
  */
 export function apply(ctx: Context, config: ConfigShape): void {
   const logger = ctx.logger(name)
   // The composition row alone must already be valid: a mount that cannot run is
   // a configuration bug, and stopping the plugin tree is the loud answer.
-  let runtime = buildRuntime(config)
+  // Re-read on every use: the Loader updates volatile references in place.
+  const entryConfig = (): ConfigShape => resolveConfig(config)
+  let runtime = buildRuntime(entryConfig())
 
   const states = new Map<string, AgentState>()
   const classifications = new Map<string, PendingClassification>()
@@ -176,55 +175,56 @@ export function apply(ctx: Context, config: ConfigShape): void {
   })
   syncGear()
 
-  // The namespace is registered through `ctx.inject` rather than a plain
-  // `ctx.get`: a service is only readable once its providing fiber is active,
-  // and the settings provider loads its document asynchronously. The callback
-  // runs when the service appears, is torn down and re-run when it is replaced,
-  // and never fires in a deployment that mounts no provider — where the plugin
-  // then runs on the composition row alone.
+  // The config form belongs to the entry, so this plugin never registers a
+  // namespace — it only adopts whatever the entry currently resolves to. The
+  // inject keeps the "no settings provider at all" deployment working: the
+  // callback never fires there and the plugin runs on the composition row alone.
   ctx.inject(['settings'], (settingsCtx) => {
-    const settings = settingsCtx.get('settings') as unknown as SettingsRegistry | undefined
+    const settings = settingsCtx.get('settings') as unknown as { configure?: (policy: { auto?: boolean }, owner?: unknown) => (() => void) | undefined } | undefined
     if (settings === undefined) return
-    const scope = settings.register(SETTINGS_NAMESPACE, Config, {
-      base: config,
-      applies: 'live',
-      // Cross-field rules the schema cannot express (bounds must name levels,
-      // the floor must not rank above the ceiling) are refused at the write
-      // site, so a hand edit fails loud instead of stranding the session.
-      validate: (value) => { prepareConfig(value) },
-    })
-    /** Whether a configuration from this namespace is already in effect. */
-    let configured = false
-
-    const adopt = (next: ConfigShape, origin: string): void => {
-      let built: Runtime
-      try {
-        built = buildRuntime(next)
-      } catch (error) {
-        logger.warn('configuration rejected, keeping the running one: %s', String(error))
-        return
-      }
-      const gearChanged = built.gear.id !== runtime.gear.id
-        || built.gear.name !== runtime.gear.name
-        || built.gear.description !== runtime.gear.description
-      const wasEnabled = runtime.config.enabled
-      runtime = built
-      // Everything derived from the previous configuration is now stale.
-      warned = new Set<string>()
-      capabilities.clear()
-      classifierCache.clear()
-      if (gearChanged || wasEnabled !== built.config.enabled) syncGear()
-      // The first adoption is the namespace coming into effect; every later one
-      // replaces a configuration that was already running.
-      logger.info(configured ? 'reconfigured from %s — %s' : 'configured from %s — %s', origin, describeRuntime(runtime))
-      configured = true
-    }
-
-    // The resolved value already includes the composition base, so the first
-    // adoption and every later edit share one path.
-    adopt(scope.get(), SETTINGS_NAMESPACE)
-    scope.watch((next) => { adopt(next, SETTINGS_NAMESPACE) })
+    // This plugin's page lives in the settings navigation (slot
+    // `settings.section`), so the platform must not also generate one from the
+    // schema: the same knobs would then have two editors.
+    settingsCtx.effect(
+      () => {
+        const dispose = settings.configure?.({ auto: false }, ctx.fiber)
+        return () => { dispose?.() }
+      },
+      'auto-thinking-effort: settings page policy',
+    )
   })
+
+  /** Whether the first adoption has happened (later ones are reconfigurations). */
+  let configured = false
+
+  const adopt = (next: ConfigShape, origin: string): void => {
+    let built: Runtime
+    try {
+      built = buildRuntime(next)
+    } catch (error) {
+      logger.warn('configuration rejected, keeping the running one: %s', String(error))
+      return
+    }
+    const gearChanged = built.gear.id !== runtime.gear.id
+      || built.gear.name !== runtime.gear.name
+      || built.gear.description !== runtime.gear.description
+    const wasEnabled = runtime.config.enabled
+    runtime = built
+    // Everything derived from the previous configuration is now stale.
+    warned = new Set<string>()
+    capabilities.clear()
+    classifierCache.clear()
+    if (gearChanged || wasEnabled !== built.config.enabled) syncGear()
+    logger.info(configured ? 'reconfigured from %s — %s' : 'configured from %s — %s', origin, describeRuntime(runtime))
+    configured = true
+  }
+
+  // The resolved value includes the row's own edits, so the first adoption and
+  // every later one share a single path.
+  adopt(entryConfig(), SETTINGS_NAMESPACE)
+  // Knob writes land on this entry's config: the Loader updates the volatile
+  // references in place and then re-emits this event.
+  ctx.on('loader/volatile-update', () => { adopt(entryConfig(), SETTINGS_NAMESPACE) })
 
   const stateFor = (agent: Agent): AgentState => {
     const existing = states.get(agent.id)

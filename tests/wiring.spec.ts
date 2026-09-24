@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 import type { ConfigShape } from '../src/config.ts'
 import { DEFAULT_LEVELS } from '../src/levels.ts'
-import { apply, SETTINGS_NAMESPACE } from '../src/index.ts'
+import { apply } from '../src/index.ts'
 
 const GEAR = 'auto'
 
@@ -90,41 +90,48 @@ interface HarnessOptions {
     settingsValue?: Partial<ConfigShape>
 }
 
-/** A fake settings provider recording one namespace registration. */
+/**
+ * A fake entry-config row plus the page-policy calls the plugin makes.
+ *
+ * DSH 0.1.7 removed `settings.register`: the row's volatile fields are handed to
+ * `apply` as live references, and a write updates them in place before the Loader
+ * re-emits `loader/volatile-update`. The row below models exactly that.
+ */
 interface FakeSettings {
   readonly registry: unknown
-  readonly registrations: { namespace: string; options: Record<string, unknown> }[]
-  /** Commit a new resolved value, exactly as a settings write would. */
+  /** The row handed to `apply`; one live reference per field. */
+  readonly row: Record<string, { get(): unknown }>
+  /** Page-policy calls recorded from `ctx.settings.configure`. */
+  readonly policies: { auto?: boolean }[]
+  /** Commit a new resolved value, exactly as a Loader write would. */
   push(next: ConfigShape): void
 }
 
 /**
- * Build a fake settings provider.
- * @param initial - the resolved value before any user layer exists.
- * @returns the registry, its registrations, and a way to commit a new value.
+ * Build a fake entry row and settings service.
+ * @param initial - the value the row resolves to before any write.
+ * @param emit - re-emits `loader/volatile-update` on the plugin's context.
+ * @returns the registry, the row, its policy calls, and a way to commit a value.
  */
-function fakeSettings(initial: ConfigShape): FakeSettings {
-  const registrations: { namespace: string; options: Record<string, unknown> }[] = []
-  const watchers: ((next: ConfigShape, previous: ConfigShape) => void)[] = []
-  let value = initial
+function fakeSettings(initial: ConfigShape, emit: () => void): FakeSettings {
+  const policies: { auto?: boolean }[] = []
+  let value: ConfigShape = initial
+  const row: Record<string, { get(): unknown }> = {}
+  for (const key of Object.keys(initial)) {
+    row[key] = { get: () => (value as unknown as Record<string, unknown>)[key] }
+  }
   return {
-    registrations,
+    policies,
+    row,
     registry: {
-      register(namespace: string, _schema: unknown, options: Record<string, unknown>) {
-        registrations.push({ namespace, options })
-        return {
-          get: () => value,
-          watch: (callback: (next: ConfigShape, previous: ConfigShape) => void) => {
-            watchers.push(callback)
-            return () => {}
-          },
-        }
+      configure(policy: { auto?: boolean }) {
+        policies.push(policy)
+        return () => {}
       },
     },
     push(next: ConfigShape) {
-      const previous = value
       value = next
-      for (const watcher of watchers) watcher(next, previous)
+      emit()
     },
   }
 }
@@ -173,7 +180,9 @@ function harness(options: HarnessOptions = {}): Harness {
   // The `model classifier` cases opt in by passing `classifier: 'model'`.
   const composition = resolveConfig({ classifier: 'heuristic', ...options.config })
   const resolved = resolveConfig({ ...composition, ...options.settingsValue })
-  const settings = options.settings === true ? fakeSettings(resolved) : undefined
+  const settings = options.settings === true
+    ? fakeSettings(resolved, () => { ctx.emit('loader/volatile-update', []) })
+    : undefined
   if (settings !== undefined) ctx.provide('settings', settings.registry)
 
   const agent = {
@@ -202,7 +211,9 @@ function harness(options: HarnessOptions = {}): Harness {
     selection.assembled = selection.current
   }
 
-  apply(ctx, composition)
+  // With a settings service mounted the row is the live one (writes update it in
+  // place); without one the plain composition row is the only layer.
+  apply(ctx, (settings === undefined ? composition : settings.row) as unknown as ConfigShape)
 
   // One macrotask lets cordis finish loading the fiber that carries the
   // settings `inject` callback; every async entry point waits for it first.
@@ -490,15 +501,15 @@ describe('turn state', () => {
   })
 })
 
-describe('settings namespace', () => {
-  it('registers the namespace on the composition row, applied live', async () => {
+describe('settings page policy and live reconfiguration', () => {
+  it('suppresses the platform-generated form and runs on the entry row', async () => {
     const h = harness({ settings: true, config: { classifier: 'model' }, selectedEffort: GEAR })
     await h.settle()
-    expect(h.settings?.registrations).toHaveLength(1)
-    const [registration] = h.settings?.registrations ?? []
-    expect(registration?.namespace).toBe(SETTINGS_NAMESPACE)
-    expect(registration?.options.base).toMatchObject({ classifier: 'model' })
-    expect(registration?.options.applies).toBe('live')
+    // This plugin's one surface is its own settings page, so the form the
+    // platform would otherwise generate from the schema is switched off.
+    expect(h.settings?.policies).toEqual([{ auto: false }])
+    await h.preStep(1, [userMessage('think hard about the deadlock in the uploader')])
+    expect((await h.request(1)).reasoningEffort).toBe('max')
   })
 
   it('uses the composition row when no settings provider is mounted', async () => {

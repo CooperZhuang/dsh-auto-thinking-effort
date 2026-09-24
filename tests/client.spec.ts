@@ -154,7 +154,7 @@ function snapshot(revision: number, value: Record<string, unknown>, user: Record
 
 /**
  * Load the bundle and mount it against a fake context.
- * @param scope - the settings scope the page should bind.
+ * @param scope - the entry config form the page should bind.
  * @returns the registered component and the recordings of its writes.
  */
 function mount(scope: { getSnapshot: () => unknown; subscribe: () => () => void; mutate: (ops: unknown[], fence: unknown) => Promise<void> }) {
@@ -178,7 +178,8 @@ function mount(scope: { getSnapshot: () => unknown; subscribe: () => () => void;
     throw new Error(`unexpected module request: ${spec}`)
   })
   plugin.apply({
-    settingsScope: { bind: () => scope },
+    // 0.1.7: the entry's config form replaces `settingsScope.bind`.
+    configForms: { get: () => scope },
     slots: {
       inject: (_name: string, callback: () => void) => { callback() },
       register: (_options: unknown, registered: () => unknown) => { component = registered as () => unknown },

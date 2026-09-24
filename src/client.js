@@ -24,10 +24,11 @@
  *   settings namespace. That is the whole contract: the tab pairs served
  *   namespaces with cards registered under the same key without knowing what
  *   the namespace means.
- * - `ctx.settingsScope` binds the namespace, so reads come from the shared
- *   document mirror and every write is revision-fenced against concurrent
- *   writers. Save is one atomic mutation; a field left empty clears that field,
- *   which is how a value re-inherits the composition row.
+ * - `ctx.configForms.get(NAMESPACE)` hands over this entry's shared config form,
+ *   so reads come from the resolved document mirror and every write is
+ *   revision-fenced against concurrent writers. Save is one atomic mutation; a
+ *   field left empty clears that field, which is how a value re-inherits the
+ *   composition row.
  */
 ;(function register() {
   const NAMESPACE = 'auto-thinking-effort'
@@ -714,7 +715,7 @@
        * @param ctx - the browser plugin context.
        */
       function apply(ctx) {
-        const scope = ctx.settingsScope.bind({ namespace: NAMESPACE })
+        const scope = ctx.configForms.get(NAMESPACE)
         const catalog = createCatalog()
         // `remote` is reached through `ctx.inject`, not `ctx.get`: a service is
         // only readable once its providing fiber is active, so the plain read
@@ -733,7 +734,7 @@
         ))
       }
 
-      return { inject: ['slots', 'settingsScope'], apply }
+      return { inject: ['slots', 'configForms'], apply }
     },
   })
 })()
